@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dabio — DAB+ Radio</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-hover: #0f3460;
+            --accent: #e94560;
+            --accent-dim: #c73e54;
+            --text: #eee;
+            --text-dim: #aaa;
+            --text-muted: #666;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --border: #2a2a4a;
+            --radius: 8px;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        header {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        header h1 { font-size: 1.4rem; font-weight: 700; }
+        header h1 span { color: var(--accent); }
+        .header-actions { display: flex; gap: 8px; align-items: center; }
+        .status-dot {
+            width: 10px; height: 10px; border-radius: 50%;
+            display: inline-block; margin-right: 6px;
+        }
+        .status-dot.ok { background: var(--success); }
+        .status-dot.error { background: var(--accent); }
+        .status-dot.scanning { background: var(--warning); animation: pulse 1s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+        main { max-width: 900px; margin: 0 auto; padding: 24px; }
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: var(--accent-dim); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-secondary {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+        }
+        .btn-secondary:hover { border-color: var(--text-dim); color: var(--text); }
+
+        /* Now Playing */
+        #now-playing {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 20px;
+            margin-bottom: 24px;
+            display: none;
+        }
+        #now-playing.active { display: block; }
+        .np-header { display: flex; justify-content: space-between; align-items: flex-start; }
+        .np-info { flex: 1; }
+        .np-station { font-size: 1.3rem; font-weight: 700; margin-bottom: 4px; }
+        .np-ensemble { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 12px; }
+        .np-dls {
+            color: var(--text);
+            font-size: 0.95rem;
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.05);
+            border-radius: var(--radius);
+            min-height: 2em;
+        }
+        .np-slide {
+            width: 120px; height: 120px;
+            border-radius: var(--radius);
+            object-fit: cover;
+            margin-left: 16px;
+            display: none;
+        }
+        .np-slide.visible { display: block; }
+        .np-controls { margin-top: 12px; display: flex; align-items: center; gap: 12px; }
+        .np-status {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        /* Station List */
+        .section-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .ensemble-group { margin-bottom: 24px; }
+        .ensemble-name {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            padding: 4px 0;
+            margin-bottom: 4px;
+            border-bottom: 1px solid var(--border);
+        }
+        .station-list { list-style: none; }
+        .station-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 12px;
+            border-radius: var(--radius);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .station-item:hover { background: var(--bg-hover); }
+        .station-item.playing { background: var(--bg-hover); border-left: 3px solid var(--accent); }
+        .station-name { flex: 1; font-weight: 500; }
+        .station-block { color: var(--text-muted); font-size: 0.8rem; margin-left: 8px; }
+        .station-sid { color: var(--text-muted); font-size: 0.75rem; margin-left: 8px; font-family: monospace; }
+
+        /* Messages */
+        .message {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-muted);
+        }
+        .message.error { color: var(--accent); }
+
+        /* Chromecast */
+        #chromecast-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
+            margin-top: 24px;
+            display: none;
+        }
+        #chromecast-panel.visible { display: block; }
+        .cc-device {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1><span>Dabio</span> DAB+ Radio</h1>
+        <div class="header-actions">
+            <span class="np-status" id="system-status">
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">Connecting...</span>
+            </span>
+            <button class="btn btn-secondary" onclick="scanStations()">Scan</button>
+            <button class="btn btn-secondary" onclick="toggleChromecast()">Cast</button>
+        </div>
+    </header>
+
+    <main>
+        <!-- Now Playing -->
+        <div id="now-playing">
+            <div class="np-header">
+                <div class="np-info">
+                    <div class="np-station" id="np-station-name"></div>
+                    <div class="np-ensemble" id="np-ensemble"></div>
+                    <div class="np-dls" id="np-dls">Waiting for metadata...</div>
+                </div>
+                <img class="np-slide" id="np-slide" alt="Station slide">
+            </div>
+            <div class="np-controls">
+                <button class="btn" id="btn-stop" onclick="stopPlayback()">Stop</button>
+                <span class="np-status" id="stream-status">
+                    <span class="status-dot ok"></span> Playing
+                </span>
+            </div>
+            <audio id="audio-player" autoplay></audio>
+        </div>
+
+        <!-- Station List -->
+        <div class="section-title">Stations</div>
+        <div id="station-list">
+            <div class="message" id="loading-msg">Loading stations...</div>
+        </div>
+
+        <!-- Chromecast Panel -->
+        <div id="chromecast-panel">
+            <div class="section-title">Chromecast Devices</div>
+            <div id="cc-devices"><div class="message">Searching...</div></div>
+        </div>
+    </main>
+
+    <script>
+        const audioEl = document.getElementById('audio-player');
+        let currentStation = null;
+        let metadataInterval = null;
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT = 5;
+
+        // --- Station Loading ---
+        async function loadStations() {
+            try {
+                const resp = await fetch('/api/stations');
+                const data = await resp.json();
+                renderStations(data.stations);
+                updateStatus('ok', `${data.count} stations`);
+            } catch (e) {
+                document.getElementById('station-list').innerHTML =
+                    '<div class="message error">Failed to load stations</div>';
+                updateStatus('error', 'Connection failed');
+            }
+        }
+
+        function renderStations(stations) {
+            const container = document.getElementById('station-list');
+            if (!stations.length) {
+                container.innerHTML = '<div class="message">No stations found. Click Scan to discover stations.</div>';
+                return;
+            }
+
+            // Group by ensemble
+            const groups = {};
+            for (const s of stations) {
+                const key = `${s.block} - ${s.ensemble}`;
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(s);
+            }
+
+            let html = '';
+            for (const [group, items] of Object.entries(groups)) {
+                html += `<div class="ensemble-group">`;
+                html += `<div class="ensemble-name">${group}</div>`;
+                html += `<ul class="station-list">`;
+                for (const s of items) {
+                    const playing = currentStation?.id === s.id ? ' playing' : '';
+                    html += `<li class="station-item${playing}" onclick="playStation('${s.id}')" data-id="${s.id}">`;
+                    html += `<span class="station-name">${s.name}</span>`;
+                    html += `<span class="station-block">${s.block}</span>`;
+                    html += `<span class="station-sid">${s.service_id}</span>`;
+                    html += `</li>`;
+                }
+                html += `</ul></div>`;
+            }
+            container.innerHTML = html;
+        }
+
+        // --- Playback ---
+        async function playStation(stationId) {
+            try {
+                // First, tell backend to tune
+                const resp = await fetch(`/api/station/${stationId}/play`, { method: 'POST' });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    alert(data.error || 'Failed to play station');
+                    return;
+                }
+
+                // Find station info from the list
+                const stationsResp = await fetch('/api/stations');
+                const stationsData = await stationsResp.json();
+                currentStation = stationsData.stations.find(s => s.id === stationId);
+
+                // Set audio source — this is the core: browser plays MP3 from our proxy
+                reconnectAttempts = 0;
+                audioEl.src = `/api/station/${stationId}/stream`;
+                audioEl.load();
+                audioEl.play().catch(e => console.warn('Autoplay blocked:', e));
+
+                // Update UI
+                showNowPlaying();
+                highlightStation(stationId);
+                startMetadataPolling(stationId);
+
+            } catch (e) {
+                console.error('Play failed:', e);
+                updateStreamStatus('error', 'Connection failed');
+            }
+        }
+
+        function stopPlayback() {
+            audioEl.pause();
+            audioEl.src = '';
+            currentStation = null;
+            stopMetadataPolling();
+            document.getElementById('now-playing').classList.remove('active');
+            document.querySelectorAll('.station-item.playing').forEach(el => el.classList.remove('playing'));
+        }
+
+        function showNowPlaying() {
+            if (!currentStation) return;
+            document.getElementById('np-station-name').textContent = currentStation.name;
+            document.getElementById('np-ensemble').textContent = `${currentStation.ensemble} · Block ${currentStation.block}`;
+            document.getElementById('np-dls').textContent = 'Waiting for metadata...';
+            document.getElementById('np-slide').classList.remove('visible');
+            document.getElementById('now-playing').classList.add('active');
+            updateStreamStatus('ok', 'Playing');
+        }
+
+        function highlightStation(id) {
+            document.querySelectorAll('.station-item').forEach(el => {
+                el.classList.toggle('playing', el.dataset.id === id);
+            });
+        }
+
+        // --- Audio Events (auto-reconnect) ---
+        audioEl.addEventListener('playing', () => {
+            reconnectAttempts = 0;
+            updateStreamStatus('ok', 'Playing');
+        });
+
+        audioEl.addEventListener('waiting', () => {
+            updateStreamStatus('scanning', 'Buffering...');
+        });
+
+        audioEl.addEventListener('error', () => {
+            if (!currentStation) return;
+            updateStreamStatus('error', 'Stream error');
+            attemptReconnect();
+        });
+
+        audioEl.addEventListener('stalled', () => {
+            if (!currentStation) return;
+            updateStreamStatus('scanning', 'Stream stalled');
+            attemptReconnect();
+        });
+
+        function attemptReconnect() {
+            if (!currentStation || reconnectAttempts >= MAX_RECONNECT) {
+                updateStreamStatus('error', 'Reconnect failed');
+                return;
+            }
+            reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 16000);
+            updateStreamStatus('scanning', `Reconnecting (${reconnectAttempts}/${MAX_RECONNECT})...`);
+            setTimeout(() => {
+                if (currentStation) {
+                    audioEl.src = `/api/station/${currentStation.id}/stream`;
+                    audioEl.load();
+                    audioEl.play().catch(() => {});
+                }
+            }, delay);
+        }
+
+        // --- Metadata Polling ---
+        function startMetadataPolling(stationId) {
+            stopMetadataPolling();
+            fetchMetadata(stationId);
+            metadataInterval = setInterval(() => fetchMetadata(stationId), 5000);
+        }
+
+        function stopMetadataPolling() {
+            if (metadataInterval) {
+                clearInterval(metadataInterval);
+                metadataInterval = null;
+            }
+        }
+
+        async function fetchMetadata(stationId) {
+            try {
+                const resp = await fetch(`/api/station/${stationId}/metadata`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+
+                if (data.dls_text) {
+                    document.getElementById('np-dls').textContent = data.dls_text;
+                }
+                if (data.slide_url) {
+                    const slide = document.getElementById('np-slide');
+                    const newSrc = data.slide_url + '?t=' + Date.now();
+                    if (slide.src !== newSrc) {
+                        slide.src = newSrc;
+                        slide.classList.add('visible');
+                    }
+                }
+            } catch (e) {
+                // Silently fail — metadata is non-critical
+            }
+        }
+
+        // --- Scanning ---
+        async function scanStations() {
+            if (currentStation) {
+                if (!confirm('Scanning will stop playback. Continue?')) return;
+                stopPlayback();
+            }
+            updateStatus('scanning', 'Scanning...');
+            try {
+                await fetch('/api/scan');
+                // Poll for completion
+                const poll = setInterval(async () => {
+                    const health = await (await fetch('/api/health')).json();
+                    if (!health.scanning) {
+                        clearInterval(poll);
+                        loadStations();
+                    }
+                }, 2000);
+            } catch (e) {
+                updateStatus('error', 'Scan failed');
+            }
+        }
+
+        // --- Chromecast ---
+        async function toggleChromecast() {
+            const panel = document.getElementById('chromecast-panel');
+            if (panel.classList.contains('visible')) {
+                panel.classList.remove('visible');
+                return;
+            }
+            panel.classList.add('visible');
+            document.getElementById('cc-devices').innerHTML = '<div class="message">Searching for devices...</div>';
+
+            try {
+                const resp = await fetch('/api/chromecast/devices');
+                const data = await resp.json();
+                if (!data.devices.length) {
+                    document.getElementById('cc-devices').innerHTML = '<div class="message">No Chromecast devices found</div>';
+                    return;
+                }
+                let html = '';
+                for (const d of data.devices) {
+                    html += `<div class="cc-device">
+                        <span>${d.name} (${d.model})</span>
+                        <button class="btn" onclick="castTo('${d.uuid}')" ${!currentStation ? 'disabled title="Play a station first"' : ''}>Cast</button>
+                    </div>`;
+                }
+                document.getElementById('cc-devices').innerHTML = html;
+            } catch (e) {
+                document.getElementById('cc-devices').innerHTML = '<div class="message error">Failed to discover devices</div>';
+            }
+        }
+
+        async function castTo(uuid) {
+            if (!currentStation) return;
+            try {
+                await fetch('/api/chromecast/cast', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_uuid: uuid, station_id: currentStation.id }),
+                });
+            } catch (e) {
+                alert('Cast failed');
+            }
+        }
+
+        // --- UI Helpers ---
+        function updateStatus(state, text) {
+            const dot = document.getElementById('status-dot');
+            dot.className = 'status-dot ' + state;
+            document.getElementById('status-text').textContent = text;
+        }
+
+        function updateStreamStatus(state, text) {
+            const html = `<span class="status-dot ${state}"></span> ${text}`;
+            document.getElementById('stream-status').innerHTML = html;
+        }
+
+        // --- Init ---
+        loadStations();
+        // Health check every 10s
+        setInterval(async () => {
+            try {
+                const resp = await fetch('/api/health');
+                const data = await resp.json();
+                if (data.scanning) {
+                    updateStatus('scanning', 'Scanning...');
+                } else if (data.status === 'ok') {
+                    updateStatus('ok', `${data.stations_count} stations`);
+                } else {
+                    updateStatus('error', data.welle_cli?.error || 'Issue detected');
+                }
+            } catch {
+                updateStatus('error', 'Disconnected');
+            }
+        }, 10000);
+    </script>
+</body>
+</html>

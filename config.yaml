@@ -1,0 +1,20 @@
+sdr:
+  gain: -1  # auto gain, or integer 0-49. Use fixed gain if AGC drift is observed.
+  driver: "auto"  # auto, rtl_sdr, rtl_tcp, soapysdr
+
+server:
+  port: 8800
+  host: "0.0.0.0"
+
+welle_cli:
+  internal_port: 7979  # welle-cli's own web server port (not exposed to user)
+  binary_path: null  # null = auto-detect via PATH. Override with absolute path if needed.
+
+scanning:
+  priority_blocks: ["8C", "8D", "9A", "9B", "9C", "9D"]
+  dwell_time: 10  # seconds per block (minimum 8)
+  poll_interval: 2  # seconds between mux.json polls during dwell
+  full_scan: false  # set true to scan all 38 Band III blocks
+  retry_empty: true  # retry blocks that returned zero services
+
+mock_mode: false  # set true for development without SDR hardware

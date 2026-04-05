@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+data/stations.json
+*.egg-info/
+dist/
+build/
+.env

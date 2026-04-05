@@ -116,26 +116,54 @@ TUNED → RETUNING → TUNED
 
 ---
 
-## ADR-6: Install welle-cli from Ubuntu apt (Preferred)
+## ADR-6: Compile welle-cli v2.7 from Source (Primary), apt v2.4 Fallback
 
-**Status:** Accepted
+**Status:** Accepted (revised)
 
-**Context:** welle.io 2.4 is available in Ubuntu 24.04 Noble universe repository. The apt package includes both `welle-cli` and `welle-io` binaries.
+**Context:** welle.io v2.4 is available via apt on Ubuntu 24.04, but is 3 years behind upstream v2.7 (Mar 2025). The prior project (tunlezah/dab) encountered issues with the Debian-packaged v2.4 — specifically `POST /channel` hangs, likely due to Debian patches. v2.7 adds RTL-SDR V4 crash fixes, improved phase synchronization, and eliminates Debian patch uncertainty.
 
-**Decision:** Prefer apt installation (`sudo apt install -y welle.io`). Fall back to source compilation only if the apt version is broken or missing required features.
+**Decision:** Compile welle-cli v2.7 from source as the primary installation method. If compilation fails, fall back to the apt-packaged v2.4. The application must be version-aware and handle behavioural differences between versions.
+
+**Installation priority:**
+1. Compile v2.7 from source (tag `v2.7`) → install to `/usr/local/bin/welle-cli`
+2. If compilation fails → `sudo apt install -y welle.io` → `/usr/bin/welle-cli`
+
+**Version-aware behaviour:**
+
+| Feature | v2.7 (source) | v2.4 (apt) |
+|---------|---------------|------------|
+| `POST /channel` | Works reliably | May hang (Debian patches) — fall back to process restart |
+| RTL-SDR V4 | Supported | Crashes |
+| Phase sync | Improved | Older algorithm |
+| `/flac/<SID>` | Available (if built with `-DFLAC=ON`) | Not available |
+| `-O` flag | Supported | May not be supported — omit |
+| All other flags | Same | Same |
+
+**The application must:**
+- Detect the installed version at startup (`welle-cli -v`)
+- Store the version in config/state
+- Use process restart for channel switching if version is 2.4 (instead of `POST /channel`)
+- Only use CLI flags known to work on both versions unless version-gated
+
+**CLI flags safe for both versions:** `-c`, `-w`, `-g`, `-F`, `-D`, `-d`, `-C`, `-P`, `-T`, `-u`, `-f`, `-p`
+**CLI flags v2.7 only:** `-O` (codec selection)
+
+**Build command (v2.7):**
+```bash
+git clone --branch v2.7 --depth 1 https://github.com/AlbrechtL/welle.io.git /tmp/welle-build
+mkdir -p /tmp/welle-build/build && cd /tmp/welle-build/build
+cmake .. -DBUILD_WELLE_IO=OFF -DBUILD_WELLE_CLI=ON -DRTLSDR=1
+make -j$(nproc)
+sudo make install  # installs to /usr/local/bin/welle-cli
+```
 
 **Rationale:**
-- Simplest installation path
-- Automatic dependency resolution
-- Security updates via apt
-- Avoids compilation complexity (cmake, dev libraries)
-- Verified: package includes `/usr/bin/welle-cli` with man page
-
-**Verification steps after install:**
-```bash
-welle-cli -v          # Check version (expect 2.4+)
-welle-cli -h          # Confirm -w flag exists
-```
+- Eliminates Debian patch uncertainty for `POST /channel`
+- RTL-SDR V4 crash fix (issue #797)
+- Improved phase synchronization (v2.6)
+- Compile takes ~2 minutes, well-understood cmake build
+- Pinning to v2.7 tag gives reproducibility
+- apt fallback ensures the installer never fails completely
 
 ---
 

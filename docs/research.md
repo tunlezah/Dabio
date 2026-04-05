@@ -7,7 +7,7 @@ welle-cli is the command-line interface component of the welle.io project (https
 
 ### Ubuntu 24.04 (Noble) Availability
 - **Package name:** `welle.io` (in the universe repository)
-- **Version:** 2.4
+- **Version:** 2.4+ds-2build5
 - **Includes both:** `/usr/bin/welle-cli` AND `/usr/bin/welle-io` (GUI)
 - **Also includes:** Web resources at `/usr/share/welle-io/html/` (index.html, index.js)
 - **Man page:** `/usr/share/man/man1/welle-cli.1.gz`
@@ -26,8 +26,9 @@ This is a significant advantage: we can use the apt package directly (Step 2 of 
 | `-d` | Export single programme to .msc file |
 | `-C number` | Decode programmes in carousel mode (incompatible with `-D`) |
 | `-P` | Switch programmes after DLS/slide decode (max 80s); without flag, switches every 10s |
-| `-g gain` | Set input gain; `-1` for automatic gain |
-| `-F driver` | Select input driver (`airspy`, `rtl_sdr`, `rtl_tcp`, `soapysdr`) |
+| `-O codec` | Output codec: `mp3` (default) or `flac` (if compiled with FLAC support) |
+| `-g gain` | Set input gain; `-1` for AGC (auto). Internally calls `setAgc(true)` for -1 |
+| `-F driver` | Select input driver (`airspy`, `rtl_sdr`, `rtl_tcp`, `soapysdr`). For rtl_tcp: `-F rtl_tcp,host:port` |
 | `-f file` | Read IQ data from file (u8 format by default) |
 | `-u` | Disable coarse corrector for low-offset receivers |
 | `-s args` | SoapySDR driver arguments |
@@ -41,25 +42,36 @@ This is a significant advantage: we can use the apt package directly (Step 2 of 
 
 When launched with `-w <port>`, welle-cli starts an HTTP server providing:
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Built-in web UI (HTML/JS from `/usr/share/welle-io/html/`) |
-| `/mux.json` | GET | JSON metadata: ensemble info, services, DLS text, signal quality |
-| `/mp3/<SID>` | GET | Endless MP3 audio stream for service identified by SID |
-| `/channel` | GET | Get current tuned channel |
-| `/channel` | POST | Switch to a different channel (retunes the SDR) |
+| Endpoint | Method | Content-Type | Description |
+|----------|--------|-------------|-------------|
+| `/` | GET | `text/html` | Built-in web UI (HTML/JS) |
+| `/index.js` | GET | `text/javascript` | JS for built-in web UI |
+| `/mux.json` | GET | `application/json` | Full ensemble/receiver metadata |
+| `/mux.m3u` | GET | `application/mpegurl` | M3U playlist of all audio services |
+| `/mp3/<SID>` | GET | `audio/mpeg` | Endless MP3 audio stream |
+| `/flac/<SID>` | GET | `audio/flac` | FLAC audio stream (if compiled with FLAC) |
+| `/stream/<SID>` | GET | (per codec) | Audio stream using codec from `-O` flag |
+| `/slide/<SID>` | GET | `image/jpeg` or `image/png` | MOT slideshow image; 404 if none available |
+| `/channel` | GET | `text/plain` | Returns currently tuned channel name |
+| `/channel` | POST | — | Retune to new channel (body = channel name) |
+| `/fic` | GET | `application/octet-stream` | Endless FIB stream |
+| `/spectrum` | GET | `application/octet-stream` | float32 FFT magnitudes |
+| `/constellation` | GET | `application/octet-stream` | float32 phase values |
 
-**SID format:** The Service ID is a hex identifier (e.g., `0x1001`). The exact format used in the URL path needs verification — it may be decimal or hex. We will verify during integration.
+**SID format:** Accepted as hex string (e.g., `0xD220`) OR decimal integer (e.g., `53792`). The M3U playlist generates URLs using 4-character zero-padded hex without prefix. Internally matched via `to_hex(srv.serviceId, 4)`.
 
 **Example launch:**
 ```bash
 welle-cli -c 9C -w 7979
-# Then browse to http://localhost:7979/ for built-in UI
-# Or http://localhost:7979/mp3/0x1001 for audio stream
-# Or http://localhost:7979/mux.json for metadata
+# Browse to http://localhost:7979/ for built-in UI
+# http://localhost:7979/mp3/D220 for audio stream (hex SID, no 0x prefix)
+# http://localhost:7979/mux.json for metadata
+# http://localhost:7979/slide/D220 for slideshow image
 ```
 
-**Carousel mode (`-C`):** When used with `-w`, decodes a limited number of programmes simultaneously. This affects how many `/mp3/<SID>` streams can be served at once. Without `-C`, only the actively-tuned service may produce audio.
+**Carousel mode (`-C N`):** When used with `-w`, decodes N programmes in rotation. With `-P`, switches after DLS/slide decode (max 80s per service); without `-P`, switches every 10s. Without `-C`, the web server decodes programmes on-demand when a client connects to `/mp3/<SID>`.
+
+**Channel switching:** POST to `/channel` triggers full receiver teardown and rebuild: stops programme handler, destroys RadioReceiver, sets new frequency, reconstructs RadioReceiver, restarts handler. All active streams are interrupted. Expect 1-3 seconds of silence.
 
 ### Audio Output Options
 
@@ -74,30 +86,45 @@ welle-cli -c 9C -w 7979
 ### Metadata via `/mux.json`
 
 The `/mux.json` endpoint returns a JSON object containing:
-- Ensemble information (name, ID)
-- List of services with:
-  - Service ID (SID)
-  - Service name (station name)
-  - DLS (Dynamic Label Segment) text — current song/show info
-  - SLS (Slideshow) image references
-  - Audio parameters (bitrate, sample rate, codec)
-  - Signal quality indicators (SNR, frequency correction)
+- **Receiver metadata:** software name/version, hardware description, FFT window placement
+- **Ensemble data:** label, ECC (Extended Country Code), ensemble ID
+- **Services array** (per service):
+  - SID (hex), programme type, language, label (station name)
+  - Audio level (left/right for stereo), sample rate, audio mode
+  - Error counters: frame errors, Reed-Solomon errors, AAC errors
+  - `dls_label` — Dynamic Label Segment text (current song/show info)
+  - `dls_time`, `dls_lastchange` — DLS timing
+  - MOT (slideshow) timestamps
+  - X-PAD error status
+- **Demodulation metrics:** SNR, frequency correction values, FIB CRC error counts
+- **UTC time** with local offset
+- **TII data:** transmitter identification (comb, pattern, delay values)
+- **CIR peaks:** up to 6 channel impulse response peaks
+- **Message queue:** recent info/error log entries with timestamps
+
+**SLS slideshow images:** Available at `/slide/<SID>`. Content-Type is auto-detected from MOT subtype (JPEG or PNG). Returns 404 when no image is available. Includes `Last-Modified` and `Cache-Control: no-cache` headers.
 
 ### Multi-Channel Behaviour
 
 **Critical limitation:** welle-cli tunes to ONE channel (frequency block) at a time. All services on that block are available, but services on other blocks require retuning.
 
-**Channel switching:** POST to `/channel` endpoint causes a retune. This interrupts all current audio streams. There is a delay of 1-3 seconds for the new channel to lock and begin decoding.
+**Within a single ensemble:** Multiple services can be decoded simultaneously since they share the same multiplex:
+- With `-C N -w <port>`: Decode N programmes in carousel rotation
+- Without `-C`: Web server decodes programmes on-demand when clients connect
 
 **Implication for our project:** To scan multiple channels, we must retune sequentially. Scanning MUST NOT occur while a user is listening to audio.
 
 ### Known Issues
 
-1. **AGC drift:** Documented on Raspberry Pi; automatic gain control may cause signal degradation over time. Mitigation: monitor SNR from `/mux.json` and consider periodic restart.
-2. **Memory usage:** Long-running instances may accumulate memory. Monitor and restart if needed.
-3. **Channel switch latency:** 1-3 seconds of silence when switching channels.
-4. **Single client streams:** The `/mp3/<SID>` endpoint may have limitations with concurrent readers — needs testing. Our backend should proxy the stream to handle fan-out.
-5. **No built-in multi-channel scanning:** Must be implemented externally.
+1. **AGC drift ([#27](https://github.com/AlbrechtL/welle.io/issues/27)):** With AGC enabled (`-g -1`), gain gradually rises and SNR drops over time. Manual gain (e.g., `-g 12`) at ~14 dB SNR is more stable. Consider using fixed gain instead of AGC for long-running instances.
+2. **RTL_TCP gain mode ([#211](https://github.com/AlbrechtL/welle.io/issues/211)):** Missing "set gain mode 1" command for some hardware.
+3. **`-p` race condition ([#352](https://github.com/AlbrechtL/welle.io/issues/352)):** The `-p` flag tries to init a programme before channel scan completes. Not relevant to web server mode.
+4. **Gain setting failures ([#402](https://github.com/AlbrechtL/welle.io/issues/402)):** RTL-SDR gain setting errors reported.
+5. **No multi-channel support ([#712](https://github.com/AlbrechtL/welle.io/issues/712)):** Feature request exists but is not implemented. One channel per instance.
+6. **Channel switch latency:** Full receiver teardown/rebuild = 1-3 seconds silence.
+7. **CPU usage:** On Raspberry Pi 4B, single stream consumes 85-100% of one core. `-T` (disable TII) helps.
+8. **Web UI polling overhead:** Idle built-in web UI generates ~110 kbps / 22 packets/sec of polling traffic. Our custom frontend should poll less aggressively.
+9. **Stream drops:** Users report streams dropping after minutes, possibly AGC-related.
 
 ### Build Flags (for source compilation)
 

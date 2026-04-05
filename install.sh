@@ -1,62 +1,185 @@
 #!/bin/bash
 set -euo pipefail
 
-# Dabio Installer — Ubuntu 24.04
-# Compiles welle-cli v2.7 from source (primary), falls back to apt v2.4
+# ══════════════════════════════════════════════════════════════════════
+#  Dabio Installer — DAB+ Radio Web Player
+#  Target: Ubuntu 24.04 (Noble Numbat)
+#
+#  This installer will:
+#    1. Clean up any prior Dabio / welle-cli processes
+#    2. Install system dependencies
+#    3. Blacklist DVB-T kernel drivers for RTL-SDR
+#    4. Compile welle-cli v2.7 from source (or fall back to apt v2.4)
+#    5. Create a Python virtualenv and install Python dependencies
+#    6. Detect SDR hardware (or enable mock mode if absent)
+#    7. Create and configure a systemd service
+#    8. Start the Dabio web server
+#    9. Verify the web server is responding
+#   10. Print the access URL and status
+# ══════════════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WELLE_TAG="v2.7"
 WELLE_INTERNAL_PORT=7979
 VENV_DIR="$SCRIPT_DIR/.venv"
+CONFIG_FILE="$SCRIPT_DIR/config.yaml"
+LOG_FILE="$SCRIPT_DIR/data/install.log"
 
+# Colours
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m'
 
-info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error() { echo -e "${RED}[ERROR]${NC} $*"; }
+# Step counter
+STEP=0
+TOTAL_STEPS=10
 
-# ── Step 0: Prerequisites ────────────────────────────────────────────
-info "Checking prerequisites..."
+step()  { STEP=$((STEP + 1)); echo -e "\n${BLUE}[${STEP}/${TOTAL_STEPS}]${NC} ${BOLD}$*${NC}"; }
+info()  { echo -e "  ${GREEN}✓${NC} $*"; }
+warn()  { echo -e "  ${YELLOW}⚠${NC} $*"; }
+error() { echo -e "  ${RED}✗${NC} $*"; }
+detail(){ echo -e "    $*"; }
+
+# Ensure log directory exists
+mkdir -p "$SCRIPT_DIR/data"
+
+# Tee all output to log file
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo ""
+echo -e "${BOLD}══════════════════════════════════════════════════════${NC}"
+echo -e "${BOLD}  Dabio Installer — DAB+ Radio Web Player${NC}"
+echo -e "${BOLD}══════════════════════════════════════════════════════${NC}"
+echo "  Started: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "  Log file: $LOG_FILE"
+echo ""
+
+# Track overall status
+INSTALL_OK=true
+WARNINGS=()
+
+# ─────────────────────────────────────────────────────────────────────
+step "Checking prerequisites"
+# ─────────────────────────────────────────────────────────────────────
 
 if [ "$(id -u)" -ne 0 ]; then
-    error "This installer must be run as root (sudo ./install.sh)"
+    error "This installer must be run as root."
+    echo ""
+    echo "  Run: sudo ./install.sh"
+    echo ""
     exit 1
 fi
+info "Running as root"
 
-# Detect Ubuntu version
+# Detect OS
 if [ -f /etc/os-release ]; then
     . /etc/os-release
-    if [ "$ID" != "ubuntu" ] || [[ "$VERSION_ID" != "24.04"* ]]; then
+    if [ "$ID" = "ubuntu" ] && [[ "$VERSION_ID" == "24.04"* ]]; then
+        info "Ubuntu 24.04 detected"
+    else
         warn "This installer targets Ubuntu 24.04. Detected: $ID $VERSION_ID"
+        WARNINGS+=("Running on unsupported OS: $ID $VERSION_ID")
+    fi
+else
+    warn "Could not detect OS version"
+fi
+
+# Check internet connectivity (needed for apt and git clone)
+if curl -sf --max-time 5 https://github.com > /dev/null 2>&1; then
+    info "Internet connectivity OK"
+else
+    warn "Cannot reach github.com — source compilation may fail"
+    WARNINGS+=("No internet — will try apt only for welle-cli")
+fi
+
+# ─────────────────────────────────────────────────────────────────────
+step "Cleaning up previous installations"
+# ─────────────────────────────────────────────────────────────────────
+
+# Stop systemd service if it exists
+if systemctl is-active --quiet dabio.service 2>/dev/null; then
+    systemctl stop dabio.service
+    info "Stopped existing dabio service"
+else
+    detail "No existing dabio service running"
+fi
+
+# Kill orphaned processes
+KILLED=0
+for proc in welle-cli dabio uvicorn; do
+    if pgrep -f "$proc" > /dev/null 2>&1; then
+        pkill -f "$proc" 2>/dev/null || true
+        KILLED=$((KILLED + 1))
+    fi
+done
+if [ "$KILLED" -gt 0 ]; then
+    info "Killed $KILLED orphaned process(es)"
+    sleep 2  # Let ports release
+else
+    detail "No orphaned processes found"
+fi
+
+# Check if ports are free
+for port in 8800 "$WELLE_INTERNAL_PORT"; do
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        PID=$(ss -tlnp 2>/dev/null | grep ":${port} " | grep -oP 'pid=\K\d+' | head -1)
+        warn "Port $port is in use (PID: ${PID:-unknown})"
+        WARNINGS+=("Port $port occupied — may need to kill process or change config")
+    fi
+done
+info "Port cleanup complete"
+
+# ─────────────────────────────────────────────────────────────────────
+step "Installing system dependencies"
+# ─────────────────────────────────────────────────────────────────────
+
+apt-get update -qq >> "$LOG_FILE" 2>&1
+
+SYSTEM_PKGS=(
+    python3 python3-venv python3-pip
+    rtl-sdr librtlsdr-dev librtlsdr2
+    ffmpeg
+    avahi-daemon avahi-utils
+    libusb-1.0-0-dev
+    curl
+)
+
+for pkg in "${SYSTEM_PKGS[@]}"; do
+    if dpkg -s "$pkg" > /dev/null 2>&1; then
+        detail "$pkg — already installed"
+    else
+        if apt-get install -y -qq "$pkg" >> "$LOG_FILE" 2>&1; then
+            info "$pkg — installed"
+        else
+            error "$pkg — FAILED to install"
+            INSTALL_OK=false
+        fi
+    fi
+done
+
+# Ensure avahi is running (needed for Chromecast mDNS)
+if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+    info "avahi-daemon is running"
+else
+    systemctl start avahi-daemon 2>/dev/null || true
+    if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+        info "avahi-daemon started"
+    else
+        warn "avahi-daemon not running — Chromecast discovery will not work"
+        WARNINGS+=("avahi-daemon failed to start")
     fi
 fi
 
-# ── Step 1: Kill any existing welle-cli / dabio processes ────────────
-info "Cleaning up any existing processes..."
-pkill -f "welle-cli" 2>/dev/null || true
-pkill -f "dabio" 2>/dev/null || true
-sleep 1
+# ─────────────────────────────────────────────────────────────────────
+step "Blacklisting DVB-T kernel drivers"
+# ─────────────────────────────────────────────────────────────────────
 
-# ── Step 2: System dependencies ──────────────────────────────────────
-info "Installing system dependencies..."
-apt-get update -qq
-
-# Common deps needed regardless of welle-cli installation method
-apt-get install -y -qq \
-    python3 python3-venv python3-pip \
-    rtl-sdr librtlsdr-dev librtlsdr2 \
-    ffmpeg \
-    avahi-daemon avahi-utils \
-    libusb-1.0-0-dev \
-    curl \
-    2>/dev/null
-
-# ── Step 3: Blacklist DVB-T kernel drivers ───────────────────────────
-info "Blacklisting DVB-T kernel drivers for RTL-SDR..."
-cat > /etc/modprobe.d/rtl-sdr-blacklist.conf << 'BLACKLIST'
+BLACKLIST_FILE="/etc/modprobe.d/rtl-sdr-blacklist.conf"
+cat > "$BLACKLIST_FILE" << 'BLACKLIST'
+# Blacklist DVB-T drivers so RTL-SDR can use the device directly
 blacklist dvb_usb_rtl28xxu
 blacklist dvb_usb_rtl2832u
 blacklist dvb_usb_v2
@@ -66,77 +189,102 @@ blacklist rtl2832
 blacklist rtl2832_sdr
 blacklist rtl2838
 BLACKLIST
-modprobe -r dvb_usb_rtl28xxu 2>/dev/null || true
+info "Written $BLACKLIST_FILE"
 
-# ── Step 4: Install welle-cli ────────────────────────────────────────
+# Unload if currently loaded
+for mod in dvb_usb_rtl28xxu dvb_usb_rtl2832u rtl2832_sdr; do
+    if lsmod | grep -q "^$mod"; then
+        modprobe -r "$mod" 2>/dev/null && info "Unloaded kernel module: $mod" || warn "Could not unload $mod (may need reboot)"
+    fi
+done
+info "DVB-T drivers blacklisted"
+
+# ─────────────────────────────────────────────────────────────────────
+step "Installing welle-cli"
+# ─────────────────────────────────────────────────────────────────────
+
 WELLE_CLI=""
 WELLE_VERSION=""
 
 install_welle_from_source() {
-    info "Compiling welle-cli ${WELLE_TAG} from source..."
+    info "Attempting to compile welle-cli ${WELLE_TAG} from source..."
 
     # Build dependencies
-    apt-get install -y -qq \
-        git build-essential cmake \
-        libfaad-dev libmpg123-dev libfftw3-dev \
-        libmp3lame-dev libasound2-dev \
-        2>/dev/null
+    BUILD_DEPS=(git build-essential cmake libfaad-dev libmpg123-dev libfftw3-dev libmp3lame-dev libasound2-dev)
+    for pkg in "${BUILD_DEPS[@]}"; do
+        if ! dpkg -s "$pkg" > /dev/null 2>&1; then
+            apt-get install -y -qq "$pkg" >> "$LOG_FILE" 2>&1 || true
+        fi
+    done
 
     local BUILD_DIR="/tmp/welle-build-$$"
     rm -rf "$BUILD_DIR"
 
-    if git clone --branch "$WELLE_TAG" --depth 1 \
-        https://github.com/AlbrechtL/welle.io.git "$BUILD_DIR" 2>/dev/null; then
-
-        mkdir -p "$BUILD_DIR/build"
-        cd "$BUILD_DIR/build"
-
-        if cmake .. \
-            -DBUILD_WELLE_IO=OFF \
-            -DBUILD_WELLE_CLI=ON \
-            -DRTLSDR=1 \
-            2>/dev/null; then
-
-            if make -j"$(nproc)" 2>/dev/null; then
-                make install 2>/dev/null
-                cd "$SCRIPT_DIR"
-                rm -rf "$BUILD_DIR"
-
-                if [ -x /usr/local/bin/welle-cli ]; then
-                    WELLE_CLI="/usr/local/bin/welle-cli"
-                    WELLE_VERSION="2.7"
-                    info "welle-cli ${WELLE_TAG} compiled and installed successfully"
-                    return 0
-                fi
-            fi
-        fi
-
-        cd "$SCRIPT_DIR"
-        rm -rf "$BUILD_DIR"
+    detail "Cloning welle.io ${WELLE_TAG}..."
+    if ! git clone --branch "$WELLE_TAG" --depth 1 \
+        https://github.com/AlbrechtL/welle.io.git "$BUILD_DIR" >> "$LOG_FILE" 2>&1; then
+        warn "git clone failed (check internet connectivity)"
+        return 1
     fi
 
-    warn "Source compilation failed"
+    mkdir -p "$BUILD_DIR/build"
+    cd "$BUILD_DIR/build"
+
+    detail "Running cmake..."
+    if ! cmake .. \
+        -DBUILD_WELLE_IO=OFF \
+        -DBUILD_WELLE_CLI=ON \
+        -DRTLSDR=1 \
+        >> "$LOG_FILE" 2>&1; then
+        warn "cmake failed (check build dependencies)"
+        cd "$SCRIPT_DIR"
+        rm -rf "$BUILD_DIR"
+        return 1
+    fi
+
+    detail "Compiling (this may take 1-2 minutes)..."
+    if ! make -j"$(nproc)" >> "$LOG_FILE" 2>&1; then
+        warn "make failed (check $LOG_FILE for details)"
+        cd "$SCRIPT_DIR"
+        rm -rf "$BUILD_DIR"
+        return 1
+    fi
+
+    make install >> "$LOG_FILE" 2>&1
+    cd "$SCRIPT_DIR"
+    rm -rf "$BUILD_DIR"
+
+    if [ -x /usr/local/bin/welle-cli ]; then
+        WELLE_CLI="/usr/local/bin/welle-cli"
+        WELLE_VERSION="2.7"
+        info "welle-cli ${WELLE_TAG} compiled and installed to /usr/local/bin/welle-cli"
+        return 0
+    fi
+
+    warn "Compilation completed but binary not found"
     return 1
 }
 
 install_welle_from_apt() {
-    info "Installing welle-cli from apt (v2.4 fallback)..."
-    if apt-get install -y -qq welle.io 2>/dev/null; then
+    info "Falling back to apt package (welle-cli v2.4)..."
+    if apt-get install -y -qq welle.io >> "$LOG_FILE" 2>&1; then
         if [ -x /usr/bin/welle-cli ]; then
             WELLE_CLI="/usr/bin/welle-cli"
             WELLE_VERSION="2.4"
-            info "welle-cli installed from apt (v2.4)"
+            info "welle-cli v2.4 installed from apt"
+            warn "v2.4 is 3 years old — POST /channel may hang. App will use process restart for retuning."
+            WARNINGS+=("Using welle-cli v2.4 (apt fallback). Retuning uses process restart.")
             return 0
         fi
     fi
-    error "apt installation also failed"
+    error "apt installation failed"
     return 1
 }
 
-# Check if already installed
+# Check if already installed and adequate
 if [ -x /usr/local/bin/welle-cli ]; then
     existing_ver=$(/usr/local/bin/welle-cli -v 2>&1 | grep -oP '\d+\.\d+' | head -1 || echo "")
-    if [[ "$existing_ver" == "2.7"* ]] || [[ "$existing_ver" == "2.8"* ]]; then
+    if [ -n "$existing_ver" ]; then
         info "welle-cli v${existing_ver} already installed at /usr/local/bin/welle-cli"
         WELLE_CLI="/usr/local/bin/welle-cli"
         WELLE_VERSION="$existing_ver"
@@ -144,28 +292,114 @@ if [ -x /usr/local/bin/welle-cli ]; then
 fi
 
 if [ -z "$WELLE_CLI" ]; then
-    # Try source first, then apt
     install_welle_from_source || install_welle_from_apt || {
-        error "Could not install welle-cli via any method. Aborting."
-        exit 1
+        error "Could not install welle-cli via any method."
+        echo ""
+        echo "  Troubleshooting:"
+        echo "    1. Check internet connectivity: curl -I https://github.com"
+        echo "    2. Check build log: less $LOG_FILE"
+        echo "    3. Try manual apt install: sudo apt install welle.io"
+        echo "    4. Try manual source build: see docs/architecture-decisions.md"
+        echo ""
+        INSTALL_OK=false
     }
 fi
 
-info "Using welle-cli: $WELLE_CLI (v${WELLE_VERSION})"
-
-# ── Step 5: Python virtualenv and dependencies ───────────────────────
-info "Setting up Python virtualenv..."
-if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
+if [ -n "$WELLE_CLI" ]; then
+    # Verify the binary actually works
+    if "$WELLE_CLI" -h > /dev/null 2>&1; then
+        info "welle-cli binary verified: $WELLE_CLI (v${WELLE_VERSION})"
+    else
+        error "welle-cli binary exists but fails to run"
+        INSTALL_OK=false
+    fi
 fi
-"$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -r "$SCRIPT_DIR/requirements.txt"
 
-# ── Step 6: Create data directory ────────────────────────────────────
-mkdir -p "$SCRIPT_DIR/data"
+# ─────────────────────────────────────────────────────────────────────
+step "Setting up Python environment"
+# ─────────────────────────────────────────────────────────────────────
 
-# ── Step 7: Systemd service ──────────────────────────────────────────
-info "Creating systemd service..."
+PYTHON_BIN=$(command -v python3 || true)
+if [ -z "$PYTHON_BIN" ]; then
+    error "python3 not found"
+    INSTALL_OK=false
+else
+    PY_VER=$($PYTHON_BIN --version 2>&1)
+    info "Found $PY_VER"
+fi
+
+if [ ! -d "$VENV_DIR" ]; then
+    detail "Creating virtualenv..."
+    python3 -m venv "$VENV_DIR" >> "$LOG_FILE" 2>&1
+    info "Virtualenv created at $VENV_DIR"
+else
+    info "Virtualenv already exists at $VENV_DIR"
+fi
+
+detail "Upgrading pip..."
+"$VENV_DIR/bin/pip" install --quiet --upgrade pip >> "$LOG_FILE" 2>&1
+
+detail "Installing Python dependencies..."
+if "$VENV_DIR/bin/pip" install --quiet -r "$SCRIPT_DIR/requirements.txt" >> "$LOG_FILE" 2>&1; then
+    info "Python dependencies installed"
+else
+    error "Failed to install Python dependencies"
+    echo "  Check: $LOG_FILE"
+    INSTALL_OK=false
+fi
+
+# Verify imports
+if PYTHONPATH="$SCRIPT_DIR/src" "$VENV_DIR/bin/python" -c "from dabio.app import app; print('OK')" > /dev/null 2>&1; then
+    info "Python application imports verified"
+else
+    error "Python application import failed"
+    echo "  Run manually to see error:"
+    echo "    PYTHONPATH=$SCRIPT_DIR/src $VENV_DIR/bin/python -c 'from dabio.app import app'"
+    INSTALL_OK=false
+fi
+
+# ─────────────────────────────────────────────────────────────────────
+step "Detecting SDR hardware"
+# ─────────────────────────────────────────────────────────────────────
+
+SDR_FOUND=false
+
+# Check for RTL-SDR USB device
+if lsusb 2>/dev/null | grep -qi "RTL2838\|RTL2832\|0bda:2838\|0bda:2832"; then
+    info "RTL-SDR USB device detected"
+    SDR_FOUND=true
+
+    # Quick test with rtl_test
+    if command -v rtl_test > /dev/null 2>&1; then
+        if timeout 3 rtl_test -t > /dev/null 2>&1; then
+            info "RTL-SDR device accessible (rtl_test passed)"
+        else
+            warn "RTL-SDR device found via USB but rtl_test failed"
+            detail "The DVB-T kernel driver may still be loaded."
+            detail "A reboot is usually required after blacklisting DVB-T drivers."
+            detail "Try: sudo reboot"
+            WARNINGS+=("RTL-SDR detected on USB but rtl_test failed — reboot likely needed")
+        fi
+    fi
+else
+    warn "No RTL-SDR USB device detected"
+    detail "The application will start but cannot receive radio without hardware."
+    detail "Plug in an RTL-SDR dongle and run: sudo systemctl restart dabio"
+    detail ""
+    detail "For development without hardware, edit config.yaml and set mock_mode: true"
+    WARNINGS+=("No SDR hardware detected — plug in RTL-SDR dongle before using")
+fi
+
+# Never auto-modify mock_mode — that is a development-only setting.
+# Ensure config.yaml has mock_mode: false for production installs.
+if [ -f "$CONFIG_FILE" ]; then
+    sed -i 's/^mock_mode: true/mock_mode: false/' "$CONFIG_FILE"
+fi
+
+# ─────────────────────────────────────────────────────────────────────
+step "Configuring systemd service"
+# ─────────────────────────────────────────────────────────────────────
+
 cat > /etc/systemd/system/dabio.service << SYSTEMD
 [Unit]
 Description=Dabio DAB+ Radio Web Player
@@ -187,57 +421,215 @@ WantedBy=multi-user.target
 SYSTEMD
 
 systemctl daemon-reload
-systemctl enable dabio.service
+systemctl enable dabio.service >> "$LOG_FILE" 2>&1
+info "Systemd service created and enabled"
 
-# ── Step 8: Smoke test ───────────────────────────────────────────────
-info "Running smoke test..."
-SMOKE_OK=true
+# ─────────────────────────────────────────────────────────────────────
+step "Starting Dabio web server"
+# ─────────────────────────────────────────────────────────────────────
 
-# Test welle-cli can start (briefly)
-if [ -n "$WELLE_CLI" ]; then
-    info "Testing welle-cli launch..."
-    timeout 8 "$WELLE_CLI" -c 9C -w "$WELLE_INTERNAL_PORT" &
-    WELLE_PID=$!
-    sleep 4
+# Read port from config
+DABIO_PORT=$(grep -oP '^\s*port:\s*\K\d+' "$CONFIG_FILE" | head -1 || echo "8800")
+DABIO_HOST=$(grep -oP '^\s*host:\s*"\K[^"]+' "$CONFIG_FILE" | head -1 || echo "0.0.0.0")
 
-    if kill -0 "$WELLE_PID" 2>/dev/null; then
-        # Try to hit mux.json
-        if curl -sf "http://127.0.0.1:${WELLE_INTERNAL_PORT}/mux.json" > /dev/null 2>&1; then
-            info "welle-cli web server responding"
-        else
-            warn "welle-cli started but web server not responding (may need SDR device)"
+# Stop if already running
+systemctl stop dabio.service 2>/dev/null || true
+sleep 1
+
+# Start the service
+detail "Starting dabio.service..."
+if systemctl start dabio.service; then
+    info "dabio.service started"
+else
+    error "dabio.service failed to start"
+    detail "Check logs: journalctl -u dabio -n 30 --no-pager"
+    INSTALL_OK=false
+fi
+
+# Give it time to boot
+detail "Waiting for server to initialize..."
+sleep 3
+
+# ─────────────────────────────────────────────────────────────────────
+step "Verifying web server is responding"
+# ─────────────────────────────────────────────────────────────────────
+
+SERVER_OK=false
+VERIFY_URL="http://127.0.0.1:${DABIO_PORT}"
+
+# Check systemd service is running
+if ! systemctl is-active --quiet dabio.service 2>/dev/null; then
+    error "dabio.service is not running"
+    detail ""
+    detail "Checking service logs..."
+    journalctl -u dabio -n 15 --no-pager 2>/dev/null | while read -r line; do
+        detail "  $line"
+    done
+    INSTALL_OK=false
+else
+    info "dabio.service is active"
+
+    # Poll health endpoint with retries (server may still be initializing)
+    MAX_RETRIES=6
+    RETRY_DELAY=2
+    for i in $(seq 1 $MAX_RETRIES); do
+        if curl -sf "${VERIFY_URL}/api/health" > /tmp/dabio_health_$$.json 2>/dev/null; then
+            SERVER_OK=true
+            break
         fi
-        kill "$WELLE_PID" 2>/dev/null || true
-        wait "$WELLE_PID" 2>/dev/null || true
+        if [ "$i" -lt "$MAX_RETRIES" ]; then
+            detail "Attempt $i/$MAX_RETRIES — waiting ${RETRY_DELAY}s..."
+            sleep "$RETRY_DELAY"
+        fi
+    done
+
+    if $SERVER_OK; then
+        info "Health endpoint responding"
+
+        # Parse health response
+        HEALTH_STATUS=$(python3 -c "import json; d=json.load(open('/tmp/dabio_health_$$.json')); print(d.get('status','unknown'))" 2>/dev/null || echo "unknown")
+        STATION_COUNT=$(python3 -c "import json; d=json.load(open('/tmp/dabio_health_$$.json')); print(d.get('stations_count',0))" 2>/dev/null || echo "0")
+        IS_MOCK=$(python3 -c "import json; d=json.load(open('/tmp/dabio_health_$$.json')); print(d.get('mock_mode',False))" 2>/dev/null || echo "Unknown")
+
+        info "Server status: $HEALTH_STATUS"
+        info "Stations loaded: $STATION_COUNT"
+        if [ "$IS_MOCK" = "True" ]; then
+            info "Mode: Mock (no SDR hardware)"
+        else
+            info "Mode: Live SDR"
+        fi
+
+        # Test that the frontend loads
+        if curl -sf "${VERIFY_URL}/" > /dev/null 2>&1; then
+            info "Frontend (index.html) loads OK"
+        else
+            warn "Frontend failed to load"
+        fi
+
+        # Test stations endpoint
+        if curl -sf "${VERIFY_URL}/api/stations" > /dev/null 2>&1; then
+            info "Stations API responding"
+        else
+            warn "Stations API not responding"
+        fi
+
+        rm -f "/tmp/dabio_health_$$.json"
     else
-        warn "welle-cli exited quickly (may need SDR device connected)"
+        error "Health endpoint not responding after ${MAX_RETRIES} attempts"
+        INSTALL_OK=false
+
+        detail ""
+        detail "Service logs:"
+        journalctl -u dabio -n 20 --no-pager 2>/dev/null | while read -r line; do
+            detail "  $line"
+        done
     fi
 fi
 
-# Test Python app can import
-if "$VENV_DIR/bin/python" -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/src'); import dabio" 2>/dev/null; then
-    info "Python application imports OK"
+# ─────────────────────────────────────────────────────────────────────
+#  RESULTS
+# ─────────────────────────────────────────────────────────────────────
+
+# Determine access URLs
+LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+ACCESS_URL="http://127.0.0.1:${DABIO_PORT}"
+if [ -n "$LOCAL_IP" ] && [ "$DABIO_HOST" = "0.0.0.0" ]; then
+    LAN_URL="http://${LOCAL_IP}:${DABIO_PORT}"
 else
-    warn "Python import check failed"
-    SMOKE_OK=false
+    LAN_URL=""
 fi
 
-# ── Step 9: Summary ─────────────────────────────────────────────────
 echo ""
-echo "════════════════════════════════════════════════════════"
-info "Dabio installation complete!"
 echo ""
-echo "  welle-cli:   $WELLE_CLI (v${WELLE_VERSION})"
-echo "  Python venv: $VENV_DIR"
-echo "  Config:      $SCRIPT_DIR/config.yaml"
-echo "  Service:     dabio.service"
-echo ""
-echo "  To start:    sudo systemctl start dabio"
-echo "  To run manually: cd $SCRIPT_DIR && PYTHONPATH=src .venv/bin/python -m dabio"
-echo "  Mock mode:   Edit config.yaml → mock_mode: true"
-echo ""
-if [ "$WELLE_VERSION" = "2.4" ]; then
-    warn "Using apt-packaged welle-cli v2.4 (fallback)."
-    warn "POST /channel may not work — app will use process restart for retuning."
+if $INSTALL_OK && $SERVER_OK; then
+    # ── SUCCESS ──────────────────────────────────────────────────────
+    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}  ✓ INSTALLATION SUCCESSFUL${NC}"
+    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  ${BOLD}Dabio is running and ready.${NC}"
+    echo ""
+    echo -e "  ${BOLD}Open in your browser:${NC}"
+    echo ""
+    echo -e "    Local:   ${BOLD}${ACCESS_URL}${NC}"
+    if [ -n "$LAN_URL" ]; then
+        echo -e "    Network: ${BOLD}${LAN_URL}${NC}"
+    fi
+    echo ""
+    echo -e "  ${BOLD}Components:${NC}"
+    echo "    welle-cli:   $WELLE_CLI (v${WELLE_VERSION})"
+    echo "    Python:      $VENV_DIR"
+    echo "    Config:      $CONFIG_FILE"
+    echo "    Service:     dabio.service (enabled, active)"
+    echo "    Port:        $DABIO_PORT"
+    if ! $SDR_FOUND; then
+        echo ""
+        echo -e "  ${YELLOW}No SDR hardware detected.${NC}"
+        echo "  Plug in an RTL-SDR USB dongle and restart:"
+        echo "    sudo systemctl restart dabio"
+    fi
+    if [ ${#WARNINGS[@]} -gt 0 ]; then
+        echo ""
+        echo -e "  ${YELLOW}Warnings:${NC}"
+        for w in "${WARNINGS[@]}"; do
+            echo -e "    ${YELLOW}⚠${NC} $w"
+        done
+    fi
+    echo ""
+    echo "  Useful commands:"
+    echo "    sudo systemctl status dabio    # Check status"
+    echo "    sudo systemctl restart dabio   # Restart"
+    echo "    sudo journalctl -u dabio -f    # View live logs"
+    echo "    curl ${ACCESS_URL}/api/health  # Health check"
+    echo ""
+    echo -e "${GREEN}══════════════════════════════════════════════════════${NC}"
+
+    exit 0
+else
+    # ── FAILURE ──────────────────────────────────────────────────────
+    echo -e "${RED}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}${BOLD}  ✗ INSTALLATION COMPLETED WITH ERRORS${NC}"
+    echo -e "${RED}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    if [ -z "$WELLE_CLI" ]; then
+        echo -e "  ${RED}Problem: welle-cli is not installed${NC}"
+        echo ""
+        echo "  Troubleshooting:"
+        echo "    1. Check internet: curl -I https://github.com"
+        echo "    2. Try manual install: sudo apt install welle.io"
+        echo "    3. Check build log: less $LOG_FILE"
+        echo ""
+    fi
+
+    if ! $SERVER_OK; then
+        echo -e "  ${RED}Problem: Web server is not responding on port ${DABIO_PORT}${NC}"
+        echo ""
+        echo "  Troubleshooting:"
+        echo "    1. Check service status:  sudo systemctl status dabio"
+        echo "    2. View service logs:     sudo journalctl -u dabio -n 50 --no-pager"
+        echo "    3. Check port is free:    ss -tlnp | grep ${DABIO_PORT}"
+        echo "    4. Try running manually:"
+        echo "       cd $SCRIPT_DIR"
+        echo "       PYTHONPATH=src .venv/bin/python -m dabio"
+        echo ""
+        echo "    5. If no SDR hardware, enable mock mode:"
+        echo "       Edit $CONFIG_FILE → mock_mode: true"
+        echo "       sudo systemctl restart dabio"
+        echo ""
+    fi
+
+    if [ ${#WARNINGS[@]} -gt 0 ]; then
+        echo -e "  ${YELLOW}Warnings encountered:${NC}"
+        for w in "${WARNINGS[@]}"; do
+            echo -e "    ${YELLOW}⚠${NC} $w"
+        done
+        echo ""
+    fi
+
+    echo "  Full install log: $LOG_FILE"
+    echo ""
+    echo -e "${RED}══════════════════════════════════════════════════════${NC}"
+
+    exit 1
 fi
-echo "════════════════════════════════════════════════════════"

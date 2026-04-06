@@ -23,7 +23,8 @@ welle_cli:
   binary_path: null  # null = auto-detect via PATH. Override with absolute path if needed.
 
 scanning:
-  priority_blocks: ["8C", "8D", "9A", "9B", "9C", "9D"]
+  # Canberra active blocks first, then other Australian markets
+  priority_blocks: ["8D", "9C", "8C", "9A", "9B", "9D"]
   dwell_time: 10  # seconds per block (minimum 8)
   poll_interval: 2  # seconds between mux.json polls during dwell
   full_scan: false  # set true to scan all 38 Band III blocks

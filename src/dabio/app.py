@@ -1,6 +1,10 @@
 """FastAPI application — Dabio DAB+ Radio Web Player."""
 import asyncio
+import collections
+import json
+import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -28,12 +32,34 @@ broadcasters: BroadcasterPool
 chromecast_mgr: ChromecastManager
 mock_server: MockWelleServer | None = None
 
+# In-memory log buffer for the web UI log viewer
+LOG_BUFFER_SIZE = 500
+log_buffer: collections.deque[dict] = collections.deque(maxlen=LOG_BUFFER_SIZE)
+
+
+class WebLogHandler(logging.Handler):
+    """Captures log records into an in-memory ring buffer for the web UI."""
+    def emit(self, record: logging.LogRecord) -> None:
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "component": getattr(record, "component", record.name),
+            "severity": record.levelname,
+            "message": record.getMessage(),
+        }
+        log_buffer.append(entry)
+
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global config, welle, scanner, broadcasters, chromecast_mgr, mock_server
 
     setup_logging()
+
+    # Add web log handler so UI can read logs
+    web_handler = WebLogHandler()
+    web_handler.setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(web_handler)
+
     config = AppConfig.load()
     log.info(f"Dabio starting (mock_mode={config.mock_mode})")
 
@@ -62,7 +88,7 @@ async def lifespan(application: FastAPI):
         if binary:
             log.info(f"Found welle-cli: {binary} (version {version.value})")
         else:
-            log.error("welle-cli not found! Install it or enable mock_mode.")
+            log.error("welle-cli not found! Install it or enable mock_mode in config.yaml")
 
     yield
 
@@ -95,7 +121,6 @@ async def list_stations():
             "service_id": s.service_id,
             "block": s.block,
         })
-    # Group by block for frontend
     result.sort(key=lambda x: (x["block"], x["name"]))
     return {"stations": result, "count": len(result)}
 
@@ -109,14 +134,12 @@ async def play_station(station_id: str):
     if scanner.is_scanning:
         return JSONResponse({"error": "Scan in progress, try again later"}, status_code=409)
 
-    # Tune to the station's block if not already there
     current_channel = welle.status.channel
     if current_channel != station.block:
         if config.mock_mode and mock_server:
             mock_server.channel = station.block
         else:
             await welle.tune(station.block)
-            # Wait for welle-cli to stabilize
             await asyncio.sleep(1.5)
 
     return {"status": "playing", "station": station.station_id, "block": station.block}
@@ -184,7 +207,6 @@ async def station_metadata(station_id: str):
                         dls_text = svc.get("dls_label", "")
                         if isinstance(dls_text, dict):
                             dls_text = dls_text.get("label", "")
-                        # Check for slide
                         slide_url = f"/api/station/{station_id}/slide"
                         break
     except Exception as e:
@@ -224,6 +246,9 @@ async def station_slide(station_id: str):
     return JSONResponse({"error": "No slide available"}, status_code=404)
 
 
+# --- Scan Endpoints ---
+
+
 @app.get("/api/scan")
 async def trigger_scan(full: bool = False):
     if scanner.is_scanning:
@@ -239,6 +264,12 @@ async def trigger_scan(full: bool = False):
     return {"status": "scan_started", "full": full}
 
 
+@app.get("/api/scan/progress")
+async def scan_progress():
+    """Live scan progress — polled by frontend for progress bar and status."""
+    return scanner.progress.to_dict()
+
+
 async def _run_scan(full: bool) -> None:
     try:
         await scanner.scan(full=full)
@@ -246,9 +277,11 @@ async def _run_scan(full: bool) -> None:
         log.error(f"Scan failed: {e}")
 
 
+# --- Health ---
+
+
 @app.get("/api/health")
 async def health_check():
-    binary, version = welle.detect_version() if not config.mock_mode else (None, None)
     is_healthy = config.mock_mode or welle.is_running()
 
     return {
@@ -266,6 +299,20 @@ async def health_check():
         "stations_count": len(scanner.stations),
         "scanning": scanner.is_scanning,
     }
+
+
+# --- Logs ---
+
+
+@app.get("/api/logs")
+async def get_logs(limit: int = 100, severity: str = ""):
+    """Return recent log entries from the in-memory buffer."""
+    entries = list(log_buffer)
+    if severity:
+        sev_upper = severity.upper()
+        entries = [e for e in entries if e["severity"] == sev_upper]
+    # Return most recent `limit` entries
+    return {"logs": entries[-limit:], "total": len(log_buffer)}
 
 
 # --- Chromecast Endpoints ---

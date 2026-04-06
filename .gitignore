@@ -6,3 +6,4 @@ data/stations.json
 dist/
 build/
 .env
+data/

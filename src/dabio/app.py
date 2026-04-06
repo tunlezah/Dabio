@@ -266,8 +266,15 @@ async def trigger_scan(full: bool = False):
 
 @app.get("/api/scan/progress")
 async def scan_progress():
-    """Live scan progress — polled by frontend for progress bar and status."""
     return scanner.progress.to_dict()
+
+
+@app.post("/api/scan/stop")
+async def stop_scan():
+    if not scanner.is_scanning:
+        return {"status": "not_scanning"}
+    scanner.request_stop()
+    return {"status": "stop_requested"}
 
 
 async def _run_scan(full: bool) -> None:
@@ -275,6 +282,39 @@ async def _run_scan(full: bool) -> None:
         await scanner.scan(full=full)
     except Exception as e:
         log.error(f"Scan failed: {e}")
+
+
+# --- Gain Control ---
+
+
+@app.get("/api/gain")
+async def get_gain():
+    from .scanner import GAIN_TABLE
+    return {
+        "current_index": config.sdr.gain,
+        "current_db": GAIN_TABLE.get(config.sdr.gain, 0),
+        "table": {str(k): v for k, v in GAIN_TABLE.items()},
+    }
+
+
+@app.post("/api/gain")
+async def set_gain(request: Request):
+    from .scanner import GAIN_TABLE, _save_gain_to_config
+    body = await request.json()
+    idx = body.get("gain_index")
+    if idx is None or not isinstance(idx, int) or idx < 0 or idx > 28:
+        return JSONResponse({"error": "gain_index must be 0-28"}, status_code=400)
+    config.sdr.gain = idx
+    _save_gain_to_config(idx)
+    return {"status": "ok", "gain_index": idx, "gain_db": GAIN_TABLE.get(idx, 0)}
+
+
+# --- Signal Info ---
+
+
+@app.get("/api/signal")
+async def signal_info():
+    return {"signals": scanner.get_signal_info()}
 
 
 # --- Health ---

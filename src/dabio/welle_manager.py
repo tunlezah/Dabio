@@ -240,6 +240,7 @@ class WelleManager:
             "SyncOnPhase",
             "SyncOnEndNull",
             "coarse_corrector",
+            "ADC overload",
         )
         noise_count = 0
         try:

@@ -12,24 +12,36 @@ def main():
     port = config.server.port
     host = config.server.host
 
-    # Check if port is available
+    # Check if port is available (with SO_REUSEADDR to ignore TIME_WAIT sockets)
     import socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind((host, port))
         sock.close()
     except OSError:
-        print(f"Port {port} is unavailable.")
-        # When running under systemd, don't prompt — just fail
+        print(f"Port {port} is unavailable (another process is actively listening).")
         if not sys.stdin.isatty():
-            print(f"Cannot bind to port {port}. Check config.yaml or free the port.")
-            sys.exit(1)
-        try:
-            alt = input("Enter alternative port (or Ctrl+C to exit): ").strip()
-            port = int(alt)
-        except (KeyboardInterrupt, ValueError):
-            print("\nExiting.")
-            sys.exit(1)
+            # Under systemd: wait briefly and retry once (race with prior instance)
+            import time
+            print(f"Waiting 5 seconds for port {port} to be released...")
+            time.sleep(5)
+            sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock2.bind((host, port))
+                sock2.close()
+                print(f"Port {port} is now available.")
+            except OSError:
+                print(f"Port {port} still unavailable after retry. Exiting.")
+                sys.exit(1)
+        else:
+            try:
+                alt = input("Enter alternative port (or Ctrl+C to exit): ").strip()
+                port = int(alt)
+            except (KeyboardInterrupt, ValueError):
+                print("\nExiting.")
+                sys.exit(1)
 
     # Write port file so the port is always discoverable
     DATA_DIR.mkdir(exist_ok=True)
@@ -50,12 +62,11 @@ def main():
         "dabio.app:app",
         host=host,
         port=port,
-        log_level="warning",  # We use our own JSON logger
+        log_level="warning",
     )
 
 
 def _get_local_ip() -> str:
-    """Get this machine's LAN IP address."""
     import socket
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

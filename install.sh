@@ -452,19 +452,43 @@ DABIO_PORT=$(grep -oP '^\s*port:\s*\K\d+' "$CONFIG_FILE" 2>/dev/null | head -1 |
 DABIO_HOST=$(grep -oP '^\s*host:\s*"\K[^"]+' "$CONFIG_FILE" 2>/dev/null | head -1 || echo "0.0.0.0")
 
 if $HAS_SYSTEMD; then
-    # Stop if already running and wait for port to be released
+    # Stop the service and ensure port is fully released before restarting
     systemctl stop dabio.service 2>/dev/null || true
-    # Also kill any lingering welle-cli that might hold the SDR
+
+    # Kill anything that might be holding port or device
     pkill -f "welle-cli" 2>/dev/null || true
-    # Wait for port release — poll up to 10 seconds
-    for wait_i in $(seq 1 10); do
+    pkill -f "python.*dabio" 2>/dev/null || true
+    pkill -f "uvicorn" 2>/dev/null || true
+
+    # Wait for processes to die and port to release
+    detail "Waiting for port ${DABIO_PORT} to be released..."
+    PORT_RELEASED=false
+    for wait_i in $(seq 1 15); do
         PORT_IN_USE=$(ss -tlnp 2>/dev/null | grep ":${DABIO_PORT} " || true)
         if [ -z "$PORT_IN_USE" ]; then
+            PORT_RELEASED=true
             break
         fi
-        detail "Waiting for port ${DABIO_PORT} to be released ($wait_i/10)..."
+        # After 5 seconds, try SIGKILL on anything holding the port
+        if [ "$wait_i" -eq 5 ]; then
+            PORT_PID=$(echo "$PORT_IN_USE" | grep -oP 'pid=\K\d+' | head -1 || true)
+            if [ -n "$PORT_PID" ]; then
+                detail "Force-killing PID $PORT_PID holding port ${DABIO_PORT}"
+                kill -9 "$PORT_PID" 2>/dev/null || true
+            fi
+        fi
         sleep 1
     done
+
+    if ! $PORT_RELEASED; then
+        warn "Port ${DABIO_PORT} still in use after 15 seconds"
+        WARNINGS+=("Port ${DABIO_PORT} may still be occupied — startup might fail")
+    else
+        info "Port ${DABIO_PORT} is free"
+    fi
+
+    # Brief pause to ensure kernel fully releases the socket
+    sleep 1
 
     # Start the service
     detail "Starting dabio.service..."

@@ -141,6 +141,13 @@
         .station-block { color: var(--text-muted); font-size: 0.78rem; margin-left: 8px; }
         .station-sid { color: var(--text-muted); font-size: 0.72rem; margin-left: 8px; font-family: monospace; }
 
+        /* ── Signal Strength ──────────────────────────────── */
+        .signal-bars { display: flex; gap: 2px; align-items: flex-end; height: 16px; margin-left: 8px; }
+        .signal-bar { width: 3px; background: var(--text-muted); border-radius: 1px; }
+        .signal-bar.active { background: var(--success); }
+        .signal-bar.medium { background: var(--warning); }
+        .signal-bar.weak { background: var(--error); }
+
         .message { text-align: center; padding: 36px; color: var(--text-muted); }
         .message.error { color: var(--error); }
 
@@ -243,16 +250,18 @@
 
         <!-- Scan Progress Panel -->
         <div id="scan-panel">
-            <div class="scan-title"><span class="dot warn"></span> <span id="scan-title-text">Scanning...</span></div>
-            <div class="scan-detail">Block: <b id="scan-block">—</b> (<span id="scan-block-idx">0</span>/<span id="scan-block-total">0</span>)</div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+                <div class="scan-title"><span class="dot warn"></span> <span id="scan-title-text">Scanning...</span></div>
+                <button class="btn btn-sm btn-secondary" onclick="stopScan()" id="btn-stop-scan">Stop Scan</button>
+            </div>
+            <div class="scan-detail">Block: <b id="scan-block">—</b> (<span id="scan-block-idx">0</span>/<span id="scan-block-total">0</span>) &nbsp; SNR: <b id="scan-snr">—</b> dB &nbsp; Gain: <b id="scan-gain-db">—</b> dB</div>
             <div class="scan-detail">Phase: <b id="scan-phase">—</b></div>
             <div class="progress-bar"><div class="progress-fill" id="scan-progress-bar" style="width:0%"></div></div>
             <div class="scan-stats">
                 <span>Progress: <b id="scan-pct">0</b>%</span>
-                <span>Stations found: <b id="scan-stations">0</b></span>
+                <span>Stations: <b id="scan-stations">0</b></span>
                 <span>Elapsed: <b id="scan-elapsed">0</b>s</span>
                 <span>ETA: <b id="scan-eta">—</b>s</span>
-                <span>Dwell: <b id="scan-dwell">0</b>/<b id="scan-dwell-total">0</b>s</span>
             </div>
         </div>
 
@@ -265,9 +274,12 @@
 
         <!-- Stations Tab -->
         <div class="tab-content active" id="tab-stations">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px">
                 <div class="section-title" style="margin:0">Stations</div>
-                <div style="display:flex;gap:6px">
+                <div style="display:flex;gap:6px;align-items:center">
+                    <label style="font-size:0.78rem;color:var(--text-dim)">Gain:</label>
+                    <select id="gain-select" onchange="changeGain(this.value)" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:0.78rem">
+                    </select>
                     <button class="btn btn-sm btn-secondary" onclick="scanStations(false)">Quick Scan</button>
                     <button class="btn btn-sm btn-secondary" onclick="scanStations(true)">Full Scan</button>
                 </div>
@@ -365,6 +377,8 @@
         }
     }
 
+    let signalData = {};
+
     function renderStations(stations) {
         const container = document.getElementById('station-list');
         if (!stations.length) {
@@ -382,14 +396,40 @@
             html += `<div class="ensemble-group"><div class="ensemble-name">${g.label}</div><ul class="station-list">`;
             for (const s of g.items) {
                 const playing = currentStation?.id === s.id ? ' playing' : '';
+                const sig = signalData[s.id];
+                const snr = sig?.snr || 0;
                 html += `<li class="station-item${playing}" onclick="playStation('${s.id}')" data-id="${s.id}">`;
                 html += `<span class="station-name">${esc(s.name)}</span>`;
+                html += renderSignalBars(snr);
                 html += `<span class="station-block">${s.block}</span>`;
                 html += `<span class="station-sid">${s.service_id}</span></li>`;
             }
             html += `</ul></div>`;
         }
         container.innerHTML = html;
+    }
+
+    function renderSignalBars(snr) {
+        // SNR: 0=none, 5=weak, 10=fair, 15=good, 20+=excellent
+        const bars = 5;
+        const level = snr <= 0 ? 0 : snr < 5 ? 1 : snr < 10 ? 2 : snr < 15 ? 3 : snr < 20 ? 4 : 5;
+        const cls = level <= 1 ? 'weak' : level <= 2 ? 'medium' : 'active';
+        let html = `<div class="signal-bars" title="SNR: ${snr.toFixed(1)} dB">`;
+        for (let i = 0; i < bars; i++) {
+            const h = 4 + i * 3;
+            const active = i < level ? cls : '';
+            html += `<div class="signal-bar ${active}" style="height:${h}px"></div>`;
+        }
+        html += '</div>';
+        return html;
+    }
+
+    async function loadSignalInfo() {
+        try {
+            const r = await fetch('/api/signal');
+            const d = await r.json();
+            signalData = d.signals || {};
+        } catch {}
     }
 
     function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
@@ -503,6 +543,12 @@
     function showScanPanel() { document.getElementById('scan-panel').classList.add('active'); }
     function hideScanPanel() { document.getElementById('scan-panel').classList.remove('active'); }
 
+    async function stopScan() {
+        try { await fetch('/api/scan/stop', { method: 'POST' }); } catch {}
+        document.getElementById('btn-stop-scan').disabled = true;
+        document.getElementById('btn-stop-scan').textContent = 'Stopping...';
+    }
+
     function startScanPolling() {
         if (scanPollInterval) clearInterval(scanPollInterval);
         pollScanProgress();
@@ -522,28 +568,37 @@
             document.getElementById('scan-stations').textContent = p.stations_found || 0;
             document.getElementById('scan-elapsed').textContent = Math.round(p.elapsed_seconds || 0);
             document.getElementById('scan-eta').textContent = p.eta_seconds > 0 ? Math.round(p.eta_seconds) : '—';
-            document.getElementById('scan-dwell').textContent = Math.round(p.dwell_elapsed || 0);
-            document.getElementById('scan-dwell-total').textContent = Math.round(p.dwell_total || 0);
+            document.getElementById('scan-snr').textContent = p.snr > 0 ? p.snr.toFixed(1) : '—';
+            document.getElementById('scan-gain-db').textContent = p.gain_db > 0 ? p.gain_db.toFixed(1) : '—';
             document.getElementById('scan-progress-bar').style.width = (p.percent || 0) + '%';
 
-            if (p.phase === 'retry') {
+            if (p.phase === 'auto-gain') {
+                document.getElementById('scan-title-text').textContent = `Auto-detecting gain...`;
+            } else if (p.phase === 'retry') {
                 document.getElementById('scan-title-text').textContent = 'Retrying empty blocks...';
             } else if (p.scanning) {
-                document.getElementById('scan-title-text').textContent = `Scanning block ${p.current_block}...`;
+                document.getElementById('scan-title-text').textContent = `Scanning ${p.current_block}...`;
+            }
+
+            // Refresh station list incrementally as stations are found
+            if (p.stations_found > 0 && p.scanning) {
+                loadStations();
             }
 
             if (!p.scanning) {
                 clearInterval(scanPollInterval);
                 scanPollInterval = null;
+                document.getElementById('btn-stop-scan').disabled = false;
+                document.getElementById('btn-stop-scan').textContent = 'Stop Scan';
                 if (p.phase === 'complete') {
-                    document.getElementById('scan-title-text').textContent = `Scan complete — ${p.stations_found} stations found`;
+                    document.getElementById('scan-title-text').textContent = `Done — ${p.stations_found} stations found`;
                     document.querySelector('#scan-panel .dot').className = 'dot ok';
-                    setTimeout(() => { hideScanPanel(); }, 4000);
+                    setTimeout(() => { hideScanPanel(); }, 5000);
                 } else if (p.phase === 'error') {
                     document.getElementById('scan-title-text').textContent = `Scan failed: ${p.error}`;
                     document.querySelector('#scan-panel .dot').className = 'dot err';
                 }
-                loadStations();
+                loadSignalInfo().then(() => loadStations());
             }
         } catch {}
     }
@@ -627,8 +682,38 @@
         return Math.floor(s/60) + 'm ' + Math.round(s%60) + 's';
     }
 
+    // ── Gain Control ────────────────────────────────────────────
+    async function loadGainSelector() {
+        try {
+            const r = await fetch('/api/gain');
+            const d = await r.json();
+            const sel = document.getElementById('gain-select');
+            sel.innerHTML = '';
+            const table = d.table;
+            for (let i = 0; i <= 28; i++) {
+                const db = table[String(i)] || 0;
+                const opt = document.createElement('option');
+                opt.value = i;
+                opt.textContent = `${i} (${db} dB)`;
+                if (i === d.current_index) opt.selected = true;
+                sel.appendChild(opt);
+            }
+        } catch {}
+    }
+
+    async function changeGain(idx) {
+        try {
+            await fetch('/api/gain', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ gain_index: parseInt(idx) }),
+            });
+        } catch {}
+    }
+
     // ── Init ────────────────────────────────────────────────────
-    loadStations();
+    loadGainSelector();
+    loadSignalInfo().then(() => loadStations());
 
     // Health check every 10s
     setInterval(async () => {

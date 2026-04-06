@@ -204,7 +204,12 @@ async def station_metadata(station_id: str):
                     else:
                         sid = str(sid).replace("0x", "").replace("0X", "").upper()
                     if sid == station.service_id:
-                        dls_text = svc.get("dls_label", "")
+                        # DLS can be at svc["dls"]["label"] or svc["dls_label"]
+                        dls_obj = svc.get("dls", {})
+                        if isinstance(dls_obj, dict):
+                            dls_text = dls_obj.get("label", "")
+                        if not dls_text:
+                            dls_text = svc.get("dls_label", "")
                         if isinstance(dls_text, dict):
                             dls_text = dls_text.get("label", "")
                         slide_url = f"/api/station/{station_id}/slide"
@@ -231,7 +236,7 @@ async def station_slide(station_id: str):
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"http://127.0.0.1:{port}/slide/{station.service_id}",
+                f"http://127.0.0.1:{port}/slide/0x{station.service_id}",
                 timeout=3.0,
             )
             if resp.status_code == 200:

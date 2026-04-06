@@ -56,7 +56,9 @@ class AudioBroadcaster:
 
     async def _feed_loop(self) -> None:
         """Read from welle-cli's /mp3/<SID> and push to all subscribers."""
-        url = f"http://127.0.0.1:{self.welle_port}/mp3/{self.sid}"
+        # welle-cli expects the 0x prefix in the URL path (e.g. /mp3/0x1309)
+        sid_for_url = self.sid if self.sid.startswith("0x") else f"0x{self.sid}"
+        url = f"http://127.0.0.1:{self.welle_port}/mp3/{sid_for_url}"
         retry_delay = 1
 
         while self._running and self.subscriber_count > 0:

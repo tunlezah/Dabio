@@ -452,9 +452,19 @@ DABIO_PORT=$(grep -oP '^\s*port:\s*\K\d+' "$CONFIG_FILE" 2>/dev/null | head -1 |
 DABIO_HOST=$(grep -oP '^\s*host:\s*"\K[^"]+' "$CONFIG_FILE" 2>/dev/null | head -1 || echo "0.0.0.0")
 
 if $HAS_SYSTEMD; then
-    # Stop if already running
+    # Stop if already running and wait for port to be released
     systemctl stop dabio.service 2>/dev/null || true
-    sleep 1
+    # Also kill any lingering welle-cli that might hold the SDR
+    pkill -f "welle-cli" 2>/dev/null || true
+    # Wait for port release — poll up to 10 seconds
+    for wait_i in $(seq 1 10); do
+        PORT_IN_USE=$(ss -tlnp 2>/dev/null | grep ":${DABIO_PORT} " || true)
+        if [ -z "$PORT_IN_USE" ]; then
+            break
+        fi
+        detail "Waiting for port ${DABIO_PORT} to be released ($wait_i/10)..."
+        sleep 1
+    done
 
     # Start the service
     detail "Starting dabio.service..."

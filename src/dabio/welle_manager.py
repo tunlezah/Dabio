@@ -233,16 +233,35 @@ class WelleManager:
             return False
 
     async def _read_output(self) -> None:
-        """Read and log welle-cli's stderr output."""
+        """Read and log welle-cli's stderr output.
+        Filters repetitive noise like SyncOnPhase to avoid log flooding."""
         if not self._process or not self._process.stderr:
             return
+        # Messages that repeat rapidly and aren't useful at DEBUG level
+        NOISE_PATTERNS = (
+            "SyncOnPhase",
+            "SyncOnEndNull",
+            "coarse_corrector",
+        )
+        noise_count = 0
         try:
             while True:
                 line = await self._process.stderr.readline()
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
+                if not text:
+                    continue
+                # Suppress known noisy patterns — log a summary every 50 occurrences
+                if any(p in text for p in NOISE_PATTERNS):
+                    noise_count += 1
+                    if noise_count % 50 == 1:
+                        log.debug(f"[welle-cli] {text} (repeated, showing every 50th)")
+                    continue
+                # Log everything else
+                if "error" in text.lower() or "fail" in text.lower():
+                    log.warning(f"[welle-cli] {text}")
+                else:
                     log.debug(f"[welle-cli] {text}")
         except Exception:
             pass

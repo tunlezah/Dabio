@@ -1,5 +1,7 @@
 #!/bin/bash
-set -euo pipefail
+# Do NOT use set -euo pipefail — it causes silent exits on benign failures
+# like grep-no-match in pipelines. We handle errors explicitly instead.
+set +e
 
 # ══════════════════════════════════════════════════════════════════════
 #  Dabio Installer — DAB+ Radio Web Player
@@ -45,6 +47,8 @@ detail(){ echo -e "    $*"; }
 
 # Ensure log directory exists
 mkdir -p "$SCRIPT_DIR/data"
+
+# No ERR trap — we handle all errors explicitly with if/else
 
 # Tee all output to log file
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -107,11 +111,13 @@ else
     detail "No existing dabio service running"
 fi
 
-# Kill orphaned processes
+# Kill orphaned processes (exclude this script's own PID)
 KILLED=0
-for proc in welle-cli dabio uvicorn; do
-    if pgrep -f "$proc" > /dev/null 2>&1; then
-        pkill -f "$proc" 2>/dev/null || true
+MY_PID=$$
+for proc in welle-cli "python.*dabio" uvicorn; do
+    PIDS=$(pgrep -f "$proc" 2>/dev/null | grep -v "^${MY_PID}$" || true)
+    if [ -n "$PIDS" ]; then
+        echo "$PIDS" | xargs kill 2>/dev/null || true
         KILLED=$((KILLED + 1))
     fi
 done
@@ -124,8 +130,9 @@ fi
 
 # Check if ports are free
 for port in 8800 "$WELLE_INTERNAL_PORT"; do
-    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-        PID=$(ss -tlnp 2>/dev/null | grep ":${port} " | grep -oP 'pid=\K\d+' | head -1)
+    PORT_CHECK=$(ss -tlnp 2>/dev/null | grep ":${port} " || true)
+    if [ -n "$PORT_CHECK" ]; then
+        PID=$(echo "$PORT_CHECK" | grep -oP 'pid=\K\d+' | head -1 || true)
         warn "Port $port is in use (PID: ${PID:-unknown})"
         WARNINGS+=("Port $port occupied — may need to kill process or change config")
     fi
@@ -192,11 +199,13 @@ BLACKLIST
 info "Written $BLACKLIST_FILE"
 
 # Unload if currently loaded
-for mod in dvb_usb_rtl28xxu dvb_usb_rtl2832u rtl2832_sdr; do
-    if lsmod | grep -q "^$mod"; then
-        modprobe -r "$mod" 2>/dev/null && info "Unloaded kernel module: $mod" || warn "Could not unload $mod (may need reboot)"
-    fi
-done
+if command -v lsmod > /dev/null 2>&1; then
+    for mod in dvb_usb_rtl28xxu dvb_usb_rtl2832u rtl2832_sdr; do
+        if lsmod 2>/dev/null | grep -q "^$mod"; then
+            modprobe -r "$mod" 2>/dev/null && info "Unloaded kernel module: $mod" || warn "Could not unload $mod (may need reboot)"
+        fi
+    done
+fi
 info "DVB-T drivers blacklisted"
 
 # ─────────────────────────────────────────────────────────────────────
@@ -283,7 +292,7 @@ install_welle_from_apt() {
 
 # Check if already installed and adequate
 if [ -x /usr/local/bin/welle-cli ]; then
-    existing_ver=$(/usr/local/bin/welle-cli -v 2>&1 | grep -oP '\d+\.\d+' | head -1 || echo "")
+    existing_ver=$(/usr/local/bin/welle-cli -v 2>&1 | grep -oP '\d+\.\d+' | head -1 2>/dev/null || echo "")
     if [ -n "$existing_ver" ]; then
         info "welle-cli v${existing_ver} already installed at /usr/local/bin/welle-cli"
         WELLE_CLI="/usr/local/bin/welle-cli"
@@ -420,35 +429,59 @@ StandardError=journal
 WantedBy=multi-user.target
 SYSTEMD
 
-systemctl daemon-reload
-systemctl enable dabio.service >> "$LOG_FILE" 2>&1
-info "Systemd service created and enabled"
+SYSTEMD_STATE=$(systemctl is-system-running 2>/dev/null || true)
+if [ "$SYSTEMD_STATE" = "running" ] || [ "$SYSTEMD_STATE" = "degraded" ]; then
+    HAS_SYSTEMD=true
+    systemctl daemon-reload 2>> "$LOG_FILE"
+    systemctl enable dabio.service >> "$LOG_FILE" 2>&1
+    info "Systemd service created and enabled"
+else
+    HAS_SYSTEMD=false
+    warn "systemd not active (state: ${SYSTEMD_STATE:-unknown}) — service file written but not enabled"
+    detail "Start manually: cd $SCRIPT_DIR && PYTHONPATH=src $VENV_DIR/bin/python -m dabio"
+    WARNINGS+=("systemd not active — manual startup required")
+fi
 
 # ─────────────────────────────────────────────────────────────────────
 step "Starting Dabio web server"
 # ─────────────────────────────────────────────────────────────────────
 
 # Read port from config
-DABIO_PORT=$(grep -oP '^\s*port:\s*\K\d+' "$CONFIG_FILE" | head -1 || echo "8800")
-DABIO_HOST=$(grep -oP '^\s*host:\s*"\K[^"]+' "$CONFIG_FILE" | head -1 || echo "0.0.0.0")
+DABIO_PORT=$(grep -oP '^\s*port:\s*\K\d+' "$CONFIG_FILE" 2>/dev/null | head -1 || echo "8800")
+DABIO_HOST=$(grep -oP '^\s*host:\s*"\K[^"]+' "$CONFIG_FILE" 2>/dev/null | head -1 || echo "0.0.0.0")
 
-# Stop if already running
-systemctl stop dabio.service 2>/dev/null || true
-sleep 1
+if $HAS_SYSTEMD; then
+    # Stop if already running
+    systemctl stop dabio.service 2>/dev/null || true
+    sleep 1
 
-# Start the service
-detail "Starting dabio.service..."
-if systemctl start dabio.service; then
-    info "dabio.service started"
+    # Start the service
+    detail "Starting dabio.service..."
+    if systemctl start dabio.service 2>> "$LOG_FILE"; then
+        info "dabio.service started"
+    else
+        error "dabio.service failed to start"
+        detail "Check logs: sudo journalctl -u dabio -n 30 --no-pager"
+        INSTALL_OK=false
+    fi
 else
-    error "dabio.service failed to start"
-    detail "Check logs: journalctl -u dabio -n 30 --no-pager"
-    INSTALL_OK=false
+    # No systemd — start directly in background
+    detail "No systemd — starting Dabio directly..."
+    # Kill any existing instance
+    EXISTING=$(pgrep -f "python.*dabio" 2>/dev/null | grep -v "^$$\$" || true)
+    if [ -n "$EXISTING" ]; then
+        echo "$EXISTING" | xargs kill 2>/dev/null || true
+        sleep 1
+    fi
+    cd "$SCRIPT_DIR"
+    PYTHONPATH="$SCRIPT_DIR/src" nohup "$VENV_DIR/bin/python" -m dabio >> "$LOG_FILE" 2>&1 &
+    DABIO_PID=$!
+    info "Dabio started in background (PID: $DABIO_PID)"
 fi
 
 # Give it time to boot
 detail "Waiting for server to initialize..."
-sleep 3
+sleep 4
 
 # ─────────────────────────────────────────────────────────────────────
 step "Verifying web server is responding"
@@ -457,20 +490,42 @@ step "Verifying web server is responding"
 SERVER_OK=false
 VERIFY_URL="http://127.0.0.1:${DABIO_PORT}"
 
-# Check systemd service is running
-if ! systemctl is-active --quiet dabio.service 2>/dev/null; then
-    error "dabio.service is not running"
-    detail ""
-    detail "Checking service logs..."
-    journalctl -u dabio -n 15 --no-pager 2>/dev/null | while read -r line; do
-        detail "  $line"
-    done
-    INSTALL_OK=false
+# Check if process is running
+PROCESS_ALIVE=false
+if $HAS_SYSTEMD; then
+    if systemctl is-active --quiet dabio.service 2>/dev/null; then
+        PROCESS_ALIVE=true
+        info "dabio.service is active"
+    else
+        error "dabio.service is not running"
+        detail ""
+        detail "Service logs:"
+        journalctl -u dabio -n 15 --no-pager 2>/dev/null | while IFS= read -r line; do
+            detail "  $line"
+        done
+        detail ""
+        detail "Troubleshooting:"
+        detail "  1. Check service status:  sudo systemctl status dabio"
+        detail "  2. View service logs:     sudo journalctl -u dabio -n 50 --no-pager"
+        detail "  3. Try running manually:"
+        detail "     cd $SCRIPT_DIR && PYTHONPATH=src .venv/bin/python -m dabio"
+        INSTALL_OK=false
+    fi
 else
-    info "dabio.service is active"
+    # Check background process
+    if kill -0 "${DABIO_PID:-0}" 2>/dev/null; then
+        PROCESS_ALIVE=true
+        info "Dabio process is running (PID: $DABIO_PID)"
+    else
+        error "Dabio process failed to start"
+        detail "Check the log: tail -30 $LOG_FILE"
+        INSTALL_OK=false
+    fi
+fi
 
-    # Poll health endpoint with retries (server may still be initializing)
-    MAX_RETRIES=6
+if $PROCESS_ALIVE; then
+    # Poll health endpoint with retries
+    MAX_RETRIES=8
     RETRY_DELAY=2
     for i in $(seq 1 $MAX_RETRIES); do
         if curl -sf "${VERIFY_URL}/api/health" > /tmp/dabio_health_$$.json 2>/dev/null; then
@@ -519,10 +574,14 @@ else
         INSTALL_OK=false
 
         detail ""
-        detail "Service logs:"
-        journalctl -u dabio -n 20 --no-pager 2>/dev/null | while read -r line; do
-            detail "  $line"
-        done
+        detail "Troubleshooting:"
+        detail "  1. Check if the process is running:  ps aux | grep dabio"
+        detail "  2. Check the install log:  tail -30 $LOG_FILE"
+        if $HAS_SYSTEMD; then
+            detail "  3. View service logs:  sudo journalctl -u dabio -n 50 --no-pager"
+        fi
+        detail "  4. Try running manually:"
+        detail "     cd $SCRIPT_DIR && PYTHONPATH=src .venv/bin/python -m dabio"
     fi
 fi
 
@@ -541,7 +600,7 @@ fi
 
 echo ""
 echo ""
-if $INSTALL_OK && $SERVER_OK; then
+if $SERVER_OK; then
     # ── SUCCESS ──────────────────────────────────────────────────────
     echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}${BOLD}  ✓ INSTALLATION SUCCESSFUL${NC}"

@@ -9,7 +9,7 @@ import httpx
 from .config import AppConfig, BAND_III_BLOCKS, STATIONS_CACHE, DATA_DIR
 from .logging_config import get_logger
 from .models import ScanResult, Station
-from .welle_manager import WelleManager, WelleState
+from .welle_manager import WelleManager, WelleState, WelleVersion
 
 log = get_logger("scanner")
 
@@ -54,7 +54,7 @@ class ScanProgress:
     @property
     def eta_seconds(self) -> float:
         if self.blocks_scanned == 0 or self.total_blocks == 0:
-            return self.total_blocks * 12  # rough estimate
+            return self.total_blocks * 14  # rough estimate
         rate = self.elapsed_seconds / self.blocks_scanned
         remaining = self.total_blocks - self.blocks_scanned
         return remaining * rate
@@ -130,7 +130,11 @@ class Scanner:
             log.warning(f"Failed to save station cache: {e}")
 
     async def scan(self, full: bool = False) -> dict[str, Station]:
-        """Scan for DAB+ stations. Priority blocks first, optionally all blocks."""
+        """Scan for DAB+ stations. Priority blocks first, optionally all blocks.
+
+        For v2.7: starts welle-cli once, then uses POST /channel to retune.
+        For v2.4: restarts welle-cli per block (POST /channel unreliable on Debian builds).
+        """
         if self._scanning:
             log.warning("Scan already in progress")
             return self._stations
@@ -149,8 +153,6 @@ class Scanner:
                     if block not in blocks:
                         blocks.append(block)
 
-            # Calculate total blocks including potential retries
-            # (we don't know retry count yet, so estimate conservatively)
             retry_estimate = len(self.config.scanning.priority_blocks) if self.config.scanning.retry_empty else 0
             total_blocks_estimate = len(blocks) + retry_estimate
 
@@ -161,7 +163,11 @@ class Scanner:
                 started_at=time.time(),
             )
 
-            log.info(f"Starting scan: {len(blocks)} blocks (full={full})")
+            log.info(f"Starting scan: {len(blocks)} blocks (full={full}), version={self.welle.version.value}")
+
+            # Start welle-cli on the first block
+            first_block = blocks[0]
+            await self._tune_for_scan(first_block, is_first=True)
 
             # First pass
             empty_blocks = []
@@ -171,7 +177,11 @@ class Scanner:
                 self.progress.dwell_elapsed = 0
                 self.progress.dwell_total = self.config.scanning.dwell_time
 
-                result = await self._scan_block(block)
+                # Retune if not already on this block (first block already tuned above)
+                if i > 0:
+                    await self._tune_for_scan(block, is_first=False)
+
+                result = await self._dwell_and_poll(block)
                 self.progress.blocks_scanned = i + 1
 
                 if result and result.stations:
@@ -188,7 +198,6 @@ class Scanner:
                 retry_blocks = [b for b in empty_blocks if b in self.config.scanning.priority_blocks]
                 if retry_blocks:
                     self.progress.phase = "retry"
-                    # Update total estimate now that we know actual retry count
                     self.progress.total_blocks = len(blocks) + len(retry_blocks)
                     log.info(f"Retrying {len(retry_blocks)} empty priority blocks")
 
@@ -199,7 +208,8 @@ class Scanner:
                         self.progress.dwell_elapsed = 0
                         self.progress.dwell_total = self.config.scanning.dwell_time
 
-                        result = await self._scan_block(block)
+                        await self._tune_for_scan(block, is_first=False)
+                        result = await self._dwell_and_poll(block)
                         self.progress.blocks_scanned = len(blocks) + i + 1
 
                         if result and result.stations:
@@ -208,7 +218,6 @@ class Scanner:
                             self.progress.stations_found = len(self._stations)
                             log.info(f"Block {block} (retry): found {len(result.stations)} stations")
                 else:
-                    # No retries needed — adjust total
                     self.progress.total_blocks = len(blocks)
 
             self._save_cache()
@@ -218,30 +227,47 @@ class Scanner:
             log.info(f"Scan complete: {len(self._stations)} total stations")
 
         except Exception as e:
-            log.error(f"Scan error: {e}")
+            log.error(f"Scan error: {e}", exc_info=True)
             self.progress.phase = "error"
             self.progress.error = str(e)
             self.progress.scanning = False
         finally:
             self._scanning = False
-            # Restore previous channel if we were tuned
             if previous_channel:
-                await self.welle.start(previous_channel)
+                await self._tune_for_scan(previous_channel, is_first=False)
 
         return self._stations
 
-    async def _scan_block(self, block: str) -> ScanResult | None:
-        """Scan a single DAB block with polling for best result."""
-        if block not in BAND_III_BLOCKS:
-            log.warning(f"Unknown block: {block}")
-            return None
+    async def _tune_for_scan(self, block: str, is_first: bool) -> None:
+        """Tune welle-cli to a block.
 
-        # Tune to this block
-        await self.welle.start(block)
+        v2.7 (source-built): Start once, then use POST /channel to retune.
+          This avoids killing/restarting the process and losing SDR state.
+        v2.4 (apt/fallback): Restart welle-cli each time because POST /channel
+          is unreliable on Debian-patched builds.
+        """
+        if is_first or self.welle.version != WelleVersion.V2_7:
+            # First block or v2.4: start (or restart) welle-cli
+            log.info(f"Starting welle-cli on block {block}")
+            await self.welle.start(block)
+            # Longer initial wait for SDR initialization + signal acquisition
+            await asyncio.sleep(3)
+        else:
+            # v2.7: retune via POST /channel (keeps SDR warm, faster lock)
+            log.info(f"Retuning to block {block} via POST /channel")
+            success = await self.welle._post_channel(block)
+            if success:
+                self.welle._status.channel = block
+                # Wait for retune + FIC acquisition
+                await asyncio.sleep(3)
+            else:
+                # POST /channel failed — fall back to restart
+                log.warning(f"POST /channel failed for {block}, restarting welle-cli")
+                await self.welle.start(block)
+                await asyncio.sleep(3)
 
-        # Wait briefly for initial lock
-        await asyncio.sleep(2)
-
+    async def _dwell_and_poll(self, block: str) -> ScanResult | None:
+        """Dwell on a block, polling mux.json for best result."""
         port = self.config.welle_cli.internal_port
         dwell = self.config.scanning.dwell_time
         poll_interval = self.config.scanning.poll_interval
@@ -256,6 +282,7 @@ class Scanner:
             if result and len(result.stations) > best_count:
                 best_result = result
                 best_count = len(result.stations)
+                log.info(f"Block {block}: {best_count} stations found so far (dwell {elapsed:.0f}/{dwell}s)")
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
 
@@ -270,6 +297,7 @@ class Scanner:
                     f"http://127.0.0.1:{port}/mux.json", timeout=5.0
                 )
                 if resp.status_code != 200:
+                    log.debug(f"mux.json returned status {resp.status_code} for block {block}")
                     return None
 
                 data = resp.json()
@@ -277,30 +305,44 @@ class Scanner:
             log.debug(f"Failed to fetch mux.json for block {block}: {e}")
             return None
 
-        ensemble_name = _extract_label(data.get("ensemble", {}).get("label", ""))
-        ensemble_id = data.get("ensemble", {}).get("id", "")
+        # Log raw response for debugging (first poll per block)
+        ensemble_raw = data.get("ensemble", {})
+        services_raw = data.get("services", [])
+        log.debug(
+            f"mux.json for {block}: ensemble={json.dumps(ensemble_raw, default=str)}, "
+            f"services_count={len(services_raw)}"
+        )
+        if services_raw:
+            # Log first service for format debugging
+            log.debug(f"First service sample: {json.dumps(services_raw[0], default=str)[:300]}")
+
+        ensemble_name = _extract_label(ensemble_raw.get("label", ""))
+        ensemble_id = ensemble_raw.get("id", "")
         if isinstance(ensemble_id, int):
             ensemble_id = f"{ensemble_id:04X}"
-        elif isinstance(ensemble_id, str) and not ensemble_id.startswith("0"):
-            try:
-                ensemble_id = f"{int(ensemble_id, 0):04X}"
-            except (ValueError, TypeError):
-                pass
+        elif isinstance(ensemble_id, str):
+            # Normalize: strip 0x, uppercase
+            clean = ensemble_id.replace("0x", "").replace("0X", "").strip()
+            if clean:
+                try:
+                    ensemble_id = f"{int(clean, 16):04X}"
+                except (ValueError, TypeError):
+                    ensemble_id = clean.upper()
 
-        services = data.get("services", [])
         stations = []
-
-        for svc in services:
+        for svc in services_raw:
             sid = svc.get("sid", "")
             if isinstance(sid, int):
                 sid = f"{sid:04X}"
             elif isinstance(sid, str):
-                sid = sid.replace("0x", "").replace("0X", "").upper()
+                sid = sid.replace("0x", "").replace("0X", "").upper().strip()
                 if not sid:
                     continue
 
             name = _extract_label(svc.get("label", ""))
             if not name:
+                # Don't skip — log it. The service might have a SID but label not yet decoded
+                log.debug(f"Service SID={sid} has no label yet (still decoding FIC)")
                 continue
 
             station = Station(

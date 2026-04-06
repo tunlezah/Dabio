@@ -20,10 +20,11 @@ class JSONFormatter(logging.Formatter):
 def setup_logging(level: int = logging.INFO) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JSONFormatter())
+    handler.setLevel(level)  # stdout gets INFO+
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
-    root.setLevel(level)
+    root.setLevel(logging.DEBUG)  # root at DEBUG so web handler captures everything
 
 
 def get_logger(component: str) -> logging.LoggerAdapter:

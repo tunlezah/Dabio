@@ -315,12 +315,13 @@ if [ -z "$WELLE_CLI" ]; then
 fi
 
 if [ -n "$WELLE_CLI" ]; then
-    # Verify the binary actually works
-    if "$WELLE_CLI" -h > /dev/null 2>&1; then
+    # Verify the binary actually works (-v is lightweight, -h may try to init SDR)
+    if "$WELLE_CLI" -v > /dev/null 2>&1; then
         info "welle-cli binary verified: $WELLE_CLI (v${WELLE_VERSION})"
     else
-        error "welle-cli binary exists but fails to run"
-        INSTALL_OK=false
+        warn "welle-cli exists but '-v' failed — binary may have missing libraries"
+        detail "Try: $WELLE_CLI -v"
+        detail "Try: ldd $WELLE_CLI | grep 'not found'"
     fi
 fi
 

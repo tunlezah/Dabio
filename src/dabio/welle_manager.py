@@ -84,11 +84,11 @@ class WelleManager:
             log.warning(f"Failed to detect welle-cli version: {e}")
             return binary, WelleVersion.UNKNOWN
 
-    async def start(self, channel: str) -> None:
+    async def start(self, channel: str, gain_override: int | None = None) -> None:
         async with self._lock:
-            await self._start_locked(channel)
+            await self._start_locked(channel, gain_override)
 
-    async def _start_locked(self, channel: str) -> None:
+    async def _start_locked(self, channel: str, gain_override: int | None = None) -> None:
         await self._stop_locked()
 
         binary, version = self.detect_version()
@@ -106,11 +106,9 @@ class WelleManager:
         port = self.config.welle_cli.internal_port
         cmd = [binary, "-c", channel, "-w", str(port)]
 
-        # Add gain setting
-        if self.config.sdr.gain != -1:
-            cmd.extend(["-g", str(self.config.sdr.gain)])
-        else:
-            cmd.extend(["-g", "-1"])
+        # Add gain setting (override takes precedence for auto-gain probing)
+        gain = gain_override if gain_override is not None else self.config.sdr.gain
+        cmd.extend(["-g", str(gain)])
 
         # Add driver if specified
         if self.config.sdr.driver != "auto":

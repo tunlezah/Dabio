@@ -8,9 +8,10 @@ sdr:
   #   15=28.0  16=29.7  17=32.8  18=33.8  19=36.4  20=37.2  21=38.6
   #   22=40.2  23=42.1  24=43.4  25=43.9  26=44.5  27=48.0  28=49.6
   #
-  # Recommended for DAB+ urban reception: 16 (29.7 dB)
-  # If no stations found, try higher: 20 (37.2 dB) or 22 (40.2 dB)
-  gain: 16
+  # Recommended for DAB+ urban reception: 20 (37.2 dB)
+  # If no stations found, auto-gain detection will probe different values.
+  # The best value will be saved back to this file automatically.
+  gain: 20
   driver: "auto"  # auto, rtl_sdr, rtl_tcp, soapysdr
 
 server:

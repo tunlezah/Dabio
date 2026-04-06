@@ -84,11 +84,11 @@ class WelleManager:
             log.warning(f"Failed to detect welle-cli version: {e}")
             return binary, WelleVersion.UNKNOWN
 
-    async def start(self, channel: str) -> None:
+    async def start(self, channel: str, gain_override: int | None = None) -> None:
         async with self._lock:
-            await self._start_locked(channel)
+            await self._start_locked(channel, gain_override)
 
-    async def _start_locked(self, channel: str) -> None:
+    async def _start_locked(self, channel: str, gain_override: int | None = None) -> None:
         await self._stop_locked()
 
         binary, version = self.detect_version()
@@ -106,11 +106,9 @@ class WelleManager:
         port = self.config.welle_cli.internal_port
         cmd = [binary, "-c", channel, "-w", str(port)]
 
-        # Add gain setting
-        if self.config.sdr.gain != -1:
-            cmd.extend(["-g", str(self.config.sdr.gain)])
-        else:
-            cmd.extend(["-g", "-1"])
+        # Add gain setting (override takes precedence for auto-gain probing)
+        gain = gain_override if gain_override is not None else self.config.sdr.gain
+        cmd.extend(["-g", str(gain)])
 
         # Add driver if specified
         if self.config.sdr.driver != "auto":
@@ -233,16 +231,35 @@ class WelleManager:
             return False
 
     async def _read_output(self) -> None:
-        """Read and log welle-cli's stderr output."""
+        """Read and log welle-cli's stderr output.
+        Filters repetitive noise like SyncOnPhase to avoid log flooding."""
         if not self._process or not self._process.stderr:
             return
+        # Messages that repeat rapidly and aren't useful at DEBUG level
+        NOISE_PATTERNS = (
+            "SyncOnPhase",
+            "SyncOnEndNull",
+            "coarse_corrector",
+        )
+        noise_count = 0
         try:
             while True:
                 line = await self._process.stderr.readline()
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
+                if not text:
+                    continue
+                # Suppress known noisy patterns — log a summary every 50 occurrences
+                if any(p in text for p in NOISE_PATTERNS):
+                    noise_count += 1
+                    if noise_count % 50 == 1:
+                        log.debug(f"[welle-cli] {text} (repeated, showing every 50th)")
+                    continue
+                # Log everything else
+                if "error" in text.lower() or "fail" in text.lower():
+                    log.warning(f"[welle-cli] {text}")
+                else:
                     log.debug(f"[welle-cli] {text}")
         except Exception:
             pass

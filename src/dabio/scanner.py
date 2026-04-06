@@ -132,8 +132,8 @@ class Scanner:
     async def scan(self, full: bool = False) -> dict[str, Station]:
         """Scan for DAB+ stations. Priority blocks first, optionally all blocks.
 
-        For v2.7: starts welle-cli once, then uses POST /channel to retune.
-        For v2.4: restarts welle-cli per block (POST /channel unreliable on Debian builds).
+        If no stations are found with the current gain, automatically probes
+        different gain values on a known-active block (9C) to find the best one.
         """
         if self._scanning:
             log.warning("Scan already in progress")
@@ -165,60 +165,22 @@ class Scanner:
 
             log.info(f"Starting scan: {len(blocks)} blocks (full={full}), version={self.welle.version.value}")
 
-            # Start welle-cli on the first block
-            first_block = blocks[0]
-            await self._tune_for_scan(first_block, is_first=True)
+            # Run the actual block scan
+            await self._scan_blocks(blocks)
 
-            # First pass
-            empty_blocks = []
-            for i, block in enumerate(blocks):
-                self.progress.current_block = block
-                self.progress.current_block_index = i + 1
-                self.progress.dwell_elapsed = 0
-                self.progress.dwell_total = self.config.scanning.dwell_time
-
-                # Retune if not already on this block (first block already tuned above)
-                if i > 0:
-                    await self._tune_for_scan(block, is_first=False)
-
-                result = await self._dwell_and_poll(block)
-                self.progress.blocks_scanned = i + 1
-
-                if result and result.stations:
-                    for station in result.stations:
-                        self._stations[station.station_id] = station
-                    self.progress.stations_found = len(self._stations)
-                    log.info(f"Block {block}: found {len(result.stations)} stations in '{result.ensemble_name}'")
-                else:
-                    empty_blocks.append(block)
-                    log.info(f"Block {block}: no stations found")
-
-            # Retry empty priority blocks
-            if self.config.scanning.retry_empty and empty_blocks:
-                retry_blocks = [b for b in empty_blocks if b in self.config.scanning.priority_blocks]
-                if retry_blocks:
-                    self.progress.phase = "retry"
-                    self.progress.total_blocks = len(blocks) + len(retry_blocks)
-                    log.info(f"Retrying {len(retry_blocks)} empty priority blocks")
-
-                    for i, block in enumerate(retry_blocks):
-                        overall_idx = len(blocks) + i + 1
-                        self.progress.current_block = block
-                        self.progress.current_block_index = overall_idx
-                        self.progress.dwell_elapsed = 0
-                        self.progress.dwell_total = self.config.scanning.dwell_time
-
-                        await self._tune_for_scan(block, is_first=False)
-                        result = await self._dwell_and_poll(block)
-                        self.progress.blocks_scanned = len(blocks) + i + 1
-
-                        if result and result.stations:
-                            for station in result.stations:
-                                self._stations[station.station_id] = station
-                            self.progress.stations_found = len(self._stations)
-                            log.info(f"Block {block} (retry): found {len(result.stations)} stations")
-                else:
-                    self.progress.total_blocks = len(blocks)
+            # If no stations found at all, try auto-gain detection
+            if len(self._stations) == 0:
+                log.warning("No stations found with current gain — starting auto-gain detection")
+                best_gain = await self._auto_detect_gain()
+                if best_gain is not None and best_gain != self.config.sdr.gain:
+                    log.info(f"Auto-gain selected index {best_gain} — rescanning")
+                    self.config.sdr.gain = best_gain
+                    self._save_gain_to_config(best_gain)
+                    # Rescan with the new gain
+                    self.progress.blocks_scanned = 0
+                    self.progress.started_at = time.time()
+                    self.progress.phase = "priority"
+                    await self._scan_blocks(blocks)
 
             self._save_cache()
             self.progress.phase = "complete"
@@ -237,6 +199,140 @@ class Scanner:
                 await self._tune_for_scan(previous_channel, is_first=False)
 
         return self._stations
+
+    async def _scan_blocks(self, blocks: list[str]) -> None:
+        """Scan a list of blocks, including retry pass."""
+        # Start welle-cli on the first block
+        await self._tune_for_scan(blocks[0], is_first=True)
+
+        # First pass
+        empty_blocks = []
+        for i, block in enumerate(blocks):
+            self.progress.current_block = block
+            self.progress.current_block_index = i + 1
+            self.progress.dwell_elapsed = 0
+            self.progress.dwell_total = self.config.scanning.dwell_time
+
+            if i > 0:
+                await self._tune_for_scan(block, is_first=False)
+
+            result = await self._dwell_and_poll(block)
+            self.progress.blocks_scanned = i + 1
+
+            if result and result.stations:
+                for station in result.stations:
+                    self._stations[station.station_id] = station
+                self.progress.stations_found = len(self._stations)
+                log.info(f"Block {block}: found {len(result.stations)} stations in '{result.ensemble_name}'")
+            else:
+                empty_blocks.append(block)
+                log.info(f"Block {block}: no stations found")
+
+        # Retry empty priority blocks
+        if self.config.scanning.retry_empty and empty_blocks:
+            retry_blocks = [b for b in empty_blocks if b in self.config.scanning.priority_blocks]
+            if retry_blocks:
+                self.progress.phase = "retry"
+                self.progress.total_blocks = len(blocks) + len(retry_blocks)
+                log.info(f"Retrying {len(retry_blocks)} empty priority blocks")
+
+                for i, block in enumerate(retry_blocks):
+                    overall_idx = len(blocks) + i + 1
+                    self.progress.current_block = block
+                    self.progress.current_block_index = overall_idx
+                    self.progress.dwell_elapsed = 0
+                    self.progress.dwell_total = self.config.scanning.dwell_time
+
+                    await self._tune_for_scan(block, is_first=False)
+                    result = await self._dwell_and_poll(block)
+                    self.progress.blocks_scanned = len(blocks) + i + 1
+
+                    if result and result.stations:
+                        for station in result.stations:
+                            self._stations[station.station_id] = station
+                        self.progress.stations_found = len(self._stations)
+                        log.info(f"Block {block} (retry): found {len(result.stations)} stations")
+
+    async def _auto_detect_gain(self) -> int | None:
+        """Probe different gain indices on block 9C to find the best one.
+
+        Tests a spread of gain values, picks the one that finds the most stations.
+        Returns the best gain index, or None if nothing works.
+
+        R820T gain table:
+          Index:  0    5    10   14   16   18   20   22   24   26   28
+          dB:     0.0  7.7  16.6 25.4 29.7 33.8 37.2 40.2 43.4 44.5 49.6
+        """
+        self.progress.phase = "auto-gain"
+        test_block = "9C"  # ABC/SBS national — should be available everywhere in Australia
+
+        # Test a spread of gain values (low → high)
+        gain_candidates = [10, 14, 16, 18, 20, 22, 24, 26]
+        best_gain = None
+        best_count = 0
+
+        log.info(f"Auto-gain: testing {len(gain_candidates)} gain values on block {test_block}")
+
+        for i, gain_idx in enumerate(gain_candidates):
+            self.progress.current_block = f"{test_block} (gain {gain_idx})"
+            self.progress.current_block_index = i + 1
+            self.progress.total_blocks = len(gain_candidates)
+            self.progress.dwell_elapsed = 0
+            self.progress.dwell_total = 8  # shorter dwell for gain probing
+
+            # Restart welle-cli with this gain
+            log.info(f"Auto-gain: trying index {gain_idx}")
+            await self.welle.start(test_block, gain_override=gain_idx)
+            await asyncio.sleep(4)  # Wait for signal acquisition
+
+            # Quick poll — just 3 checks over 6 seconds
+            port = self.config.welle_cli.internal_port
+            station_count = 0
+            for poll in range(3):
+                self.progress.dwell_elapsed = poll * 2
+                result = await self._fetch_mux(port, test_block)
+                if result:
+                    station_count = max(station_count, len(result.stations))
+                await asyncio.sleep(2)
+
+            log.info(f"Auto-gain: index {gain_idx} → {station_count} stations")
+
+            if station_count > best_count:
+                best_count = station_count
+                best_gain = gain_idx
+
+            # If we found a good number of stations, no need to keep testing
+            if station_count >= 10:
+                log.info(f"Auto-gain: index {gain_idx} found {station_count} stations — good enough")
+                break
+
+        if best_gain is not None and best_count > 0:
+            log.info(f"Auto-gain: best gain index = {best_gain} ({best_count} stations)")
+        else:
+            log.warning("Auto-gain: no stations found at any gain level. Check antenna.")
+
+        return best_gain
+
+    def _save_gain_to_config(self, gain_idx: int) -> None:
+        """Persist the discovered gain value to config.yaml."""
+        from .config import CONFIG_PATH
+        try:
+            if CONFIG_PATH.exists():
+                text = CONFIG_PATH.read_text()
+                import re
+                # Replace the gain line
+                new_text = re.sub(
+                    r'^(\s*gain:\s*)\S+',
+                    f'\\g<1>{gain_idx}',
+                    text,
+                    count=1,
+                    flags=re.MULTILINE,
+                )
+                if new_text != text:
+                    CONFIG_PATH.write_text(new_text)
+                    log.info(f"Saved gain index {gain_idx} to {CONFIG_PATH}")
+        except Exception as e:
+            log.warning(f"Could not save gain to config: {e}")
 
     async def _tune_for_scan(self, block: str, is_first: bool) -> None:
         """Tune welle-cli to a block.

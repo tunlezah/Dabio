@@ -766,15 +766,6 @@
                     document.querySelector('#scan-panel .dot').className = 'dot err';
                 }
                 loadSignalInfo().then(() => loadStations());
-                // Check if logos are cached; if not, trigger fetch
-                fetch('/api/logos/status').then(r => r.json()).then(d => {
-                    if (!d.cached) {
-                        fetch('/api/logos/fetch', { method: 'POST' }).then(() => {
-                            // Refresh station list to show logos
-                            setTimeout(() => loadStations(), 2000);
-                        }).catch(() => {});
-                    }
-                }).catch(() => {});
             }
         } catch {}
     }

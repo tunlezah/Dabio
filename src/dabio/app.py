@@ -18,7 +18,7 @@ from .config import AppConfig, PROJECT_ROOT
 from .logging_config import get_logger, setup_logging
 from .mock import get_mock_stations_for_scan, MOCK_STATIONS
 from .mock_server import MockWelleServer
-from .logos import fetch_all_logos, find_logo, has_cached_logos, LOGOS_DIR
+from .logos import find_logo, has_cached_logos
 from .models import Station
 from .scanner import Scanner
 from .welle_manager import WelleManager, WelleState
@@ -310,12 +310,6 @@ async def station_logo(station_id: str):
     return JSONResponse({"error": "No logo available"}, status_code=404)
 
 
-@app.post("/api/logos/fetch")
-async def trigger_logo_fetch():
-    count = await fetch_all_logos()
-    return {"status": "ok", "count": count}
-
-
 @app.get("/api/logos/status")
 async def logo_status():
     return {"cached": has_cached_logos()}
@@ -355,20 +349,8 @@ async def stop_scan():
 async def _run_scan(full: bool) -> None:
     try:
         await scanner.scan(full=full)
-        # Auto-fetch logos after first scan (one-time)
-        if not has_cached_logos() and len(scanner.stations) > 0:
-            log.info("Triggering one-time logo fetch from Fandom wiki...")
-            asyncio.create_task(_fetch_logos_background())
     except Exception as e:
         log.error(f"Scan failed: {e}")
-
-
-async def _fetch_logos_background() -> None:
-    try:
-        count = await fetch_all_logos()
-        log.info(f"Background logo fetch complete: {count} logos cached")
-    except Exception as e:
-        log.error(f"Background logo fetch failed: {e}")
 
 
 # --- Gain Control ---

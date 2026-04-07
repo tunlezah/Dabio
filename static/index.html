@@ -76,14 +76,29 @@
             background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-elevated) 100%);
             border: 1px solid var(--border); border-left: 4px solid var(--accent);
             border-radius: var(--radius); padding: 20px; margin-bottom: 20px;
-            display: none; box-shadow: var(--shadow);
+            box-shadow: var(--shadow); transition: all 0.3s ease;
         }
-        #now-playing.active { display: block; }
+        #now-playing.collapsed .np-body { display: none; }
+        #now-playing.collapsed { padding: 12px 20px; }
+        .np-title-bar {
+            display: flex; justify-content: space-between; align-items: center;
+            cursor: pointer; user-select: none;
+        }
+        .np-title-left { display: flex; align-items: center; gap: 8px; }
+        .np-collapse-btn {
+            background: none; border: none; color: var(--text-muted); cursor: pointer;
+            font-size: 1rem; padding: 2px 6px; border-radius: 4px; transition: all 0.2s;
+            line-height: 1;
+        }
+        .np-collapse-btn:hover { color: var(--text); background: var(--bg-hover); }
+        #now-playing.collapsed .np-collapse-btn { transform: rotate(-90deg); }
+        .np-body { margin-top: 12px; }
         .np-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
         .np-info { flex: 1; min-width: 0; }
         .np-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); font-weight: 700; margin-bottom: 4px; }
         .np-station { font-size: 1.3rem; font-weight: 700; margin-bottom: 2px; }
         .np-ensemble { color: var(--text-dim); font-size: 0.82rem; margin-bottom: 10px; }
+        .np-idle { color: var(--text-muted); font-size: 0.85rem; padding: 8px 0; }
         .np-dls {
             color: var(--text); font-size: 0.9rem;
             padding: 10px 14px; background: var(--bg-input);
@@ -93,8 +108,8 @@
         }
         .np-slide {
             width: 100px; height: 100px; border-radius: 8px;
-            object-fit: cover; display: none; flex-shrink: 0;
-            border: 2px solid var(--border);
+            object-fit: contain; display: none; flex-shrink: 0;
+            border: 2px solid var(--border); background: var(--bg-input);
         }
         .np-slide.visible { display: block; }
         .np-controls { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
@@ -165,6 +180,15 @@
         .card-badge.bitrate { color: var(--success); }
         .card-badge.mode { color: #79c0ff; }
         .card-badge.type { color: var(--warning); }
+
+        /* ── Station Card Logo ────────────────────────────────── */
+        .card-logo {
+            width: 36px; height: 36px; border-radius: 6px;
+            object-fit: contain; flex-shrink: 0;
+            background: var(--bg-input); display: none;
+        }
+        .card-logo.loaded { display: block; }
+        .card-top-with-logo { display: flex; align-items: center; gap: 10px; }
 
         /* ── Signal Bars ─────────────────────────────────────── */
         .signal-bars { display: flex; gap: 2px; align-items: flex-end; height: 16px; flex-shrink: 0; }
@@ -291,18 +315,29 @@
     <main>
         <!-- Now Playing -->
         <div id="now-playing">
-            <div class="np-header">
-                <div class="np-info">
-                    <div class="np-label">Now Playing</div>
-                    <div class="np-station" id="np-station-name"></div>
-                    <div class="np-ensemble" id="np-ensemble"></div>
-                    <div class="np-dls" id="np-dls">Waiting for metadata...</div>
+            <div class="np-title-bar" onclick="toggleNowPlaying()">
+                <div class="np-title-left">
+                    <div class="np-label" style="margin-bottom:0">Now Playing</div>
+                    <span id="np-title-summary" class="np-status" style="font-size:0.8rem"></span>
                 </div>
-                <img class="np-slide" id="np-slide" alt="Slide">
+                <button class="np-collapse-btn" title="Collapse">&#9660;</button>
             </div>
-            <div class="np-controls">
-                <button class="btn btn-sm btn-danger" id="btn-stop" onclick="stopPlayback()">Stop</button>
-                <span class="np-status" id="stream-status"><span class="dot ok"></span> Playing</span>
+            <div class="np-body">
+                <div id="np-idle" class="np-idle">Select a station to start listening</div>
+                <div id="np-active" style="display:none">
+                    <div class="np-header">
+                        <div class="np-info">
+                            <div class="np-station" id="np-station-name"></div>
+                            <div class="np-ensemble" id="np-ensemble"></div>
+                            <div class="np-dls" id="np-dls">Waiting for metadata...</div>
+                        </div>
+                        <img class="np-slide" id="np-slide" alt="Slide">
+                    </div>
+                    <div class="np-controls">
+                        <button class="btn btn-sm btn-danger" id="btn-stop" onclick="event.stopPropagation(); stopPlayback()">Stop</button>
+                        <span class="np-status" id="stream-status"><span class="dot ok"></span> Playing</span>
+                    </div>
+                </div>
             </div>
             <audio id="audio-player" autoplay></audio>
         </div>
@@ -473,7 +508,11 @@
                 const sig = signalData[s.id];
                 const snr = sig?.snr || 0;
                 html += `<div class="station-card${playing}" onclick="playStation('${s.id}')" data-id="${s.id}">`;
-                html += `<div class="card-top"><span class="card-name">${esc(s.name)}</span>`;
+                html += `<div class="card-top">`;
+                html += `<div class="card-top-with-logo">`;
+                html += `<img class="card-logo" data-station-id="${s.id}" src="/api/station/${s.id}/logo" onload="this.classList.add('loaded')" onerror="this.classList.remove('loaded')">`;
+                html += `<span class="card-name">${esc(s.name)}</span>`;
+                html += `</div>`;
                 html += renderSignalBars(snr);
                 html += `</div>`;
                 html += `<div class="card-meta">`;
@@ -546,7 +585,9 @@
         audioEl.pause(); audioEl.src = '';
         currentStation = null;
         stopMetadataPolling();
-        document.getElementById('now-playing').classList.remove('active');
+        document.getElementById('np-active').style.display = 'none';
+        document.getElementById('np-idle').style.display = 'block';
+        document.getElementById('np-title-summary').textContent = '';
         document.querySelectorAll('.station-card.playing').forEach(el => el.classList.remove('playing'));
     }
 
@@ -560,9 +601,27 @@
         document.getElementById('np-ensemble').textContent = ensembleText;
         document.getElementById('np-dls').textContent = 'Waiting for metadata...';
         document.getElementById('np-slide').classList.remove('visible');
-        document.getElementById('now-playing').classList.add('active');
+        document.getElementById('np-idle').style.display = 'none';
+        document.getElementById('np-active').style.display = 'block';
+        document.getElementById('np-title-summary').textContent = currentStation.name;
+        // Expand if collapsed
+        document.getElementById('now-playing').classList.remove('collapsed');
+        localStorage.setItem('dabio-np-collapsed', 'false');
         updateStreamStatus('ok', 'Playing');
     }
+
+    function toggleNowPlaying() {
+        const np = document.getElementById('now-playing');
+        const collapsed = np.classList.toggle('collapsed');
+        localStorage.setItem('dabio-np-collapsed', collapsed ? 'true' : 'false');
+    }
+
+    // Restore collapse state on load
+    (function initNowPlaying() {
+        if (localStorage.getItem('dabio-np-collapsed') === 'true') {
+            document.getElementById('now-playing').classList.add('collapsed');
+        }
+    })();
 
     function highlightStation(id) {
         document.querySelectorAll('.station-card').forEach(el => {
@@ -600,10 +659,41 @@
             if (!r.ok) return;
             const d = await r.json();
             if (d.dls_text) document.getElementById('np-dls').textContent = d.dls_text;
+
+            // Update slide/logo image in Now Playing
+            const slide = document.getElementById('np-slide');
             if (d.slide_url) {
-                const slide = document.getElementById('np-slide');
                 const newSrc = d.slide_url + '?t=' + Date.now();
-                if (slide.src !== newSrc) { slide.src = newSrc; slide.classList.add('visible'); }
+                if (!slide.src.includes(d.slide_url)) {
+                    const img = new Image();
+                    img.onload = () => { slide.src = newSrc; slide.classList.add('visible'); };
+                    img.onerror = () => {
+                        // Slide not available — try logo fallback
+                        if (d.logo_url && !slide.src.includes('/logo')) {
+                            slide.src = d.logo_url;
+                            slide.onload = () => slide.classList.add('visible');
+                            slide.onerror = () => slide.classList.remove('visible');
+                        }
+                    };
+                    img.src = newSrc;
+                }
+            } else if (d.logo_url) {
+                if (!slide.src.includes('/logo')) {
+                    slide.src = d.logo_url;
+                    slide.onload = () => slide.classList.add('visible');
+                    slide.onerror = () => slide.classList.remove('visible');
+                }
+            }
+
+            // Update live signal strength on the playing station's card
+            if (d.snr !== undefined && d.snr > 0) {
+                const card = document.querySelector(`.station-card[data-id="${stationId}"]`);
+                if (card) {
+                    const barsEl = card.querySelector('.signal-bars');
+                    if (barsEl) {
+                        barsEl.outerHTML = renderSignalBars(d.snr);
+                    }
+                }
             }
         } catch {}
     }
@@ -676,6 +766,15 @@
                     document.querySelector('#scan-panel .dot').className = 'dot err';
                 }
                 loadSignalInfo().then(() => loadStations());
+                // Check if logos are cached; if not, trigger fetch
+                fetch('/api/logos/status').then(r => r.json()).then(d => {
+                    if (!d.cached) {
+                        fetch('/api/logos/fetch', { method: 'POST' }).then(() => {
+                            // Refresh station list to show logos
+                            setTimeout(() => loadStations(), 2000);
+                        }).catch(() => {});
+                    }
+                }).catch(() => {});
             }
         } catch {}
     }

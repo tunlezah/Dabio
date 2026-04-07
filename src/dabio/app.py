@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .audio import BroadcasterPool, stream_audio
@@ -18,6 +18,7 @@ from .config import AppConfig, PROJECT_ROOT
 from .logging_config import get_logger, setup_logging
 from .mock import get_mock_stations_for_scan, MOCK_STATIONS
 from .mock_server import MockWelleServer
+from .logos import fetch_all_logos, find_logo, has_cached_logos, LOGOS_DIR
 from .models import Station
 from .scanner import Scanner
 from .welle_manager import WelleManager, WelleState
@@ -224,12 +225,14 @@ async def station_metadata(station_id: str):
     port = config.welle_cli.internal_port
     dls_text = ""
     slide_url = None
+    snr = 0.0
 
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"http://127.0.0.1:{port}/mux.json", timeout=3.0)
             if resp.status_code == 200:
                 data = resp.json()
+                snr = data.get("demodulator", {}).get("snr", 0.0)
                 for svc in data.get("services", []):
                     sid = svc.get("sid", "")
                     if isinstance(sid, int):
@@ -256,6 +259,8 @@ async def station_metadata(station_id: str):
         "ensemble": station.ensemble_name,
         "dls_text": dls_text,
         "slide_url": slide_url,
+        "logo_url": f"/api/station/{station_id}/logo",
+        "snr": snr,
     }
 
 
@@ -282,6 +287,38 @@ async def station_slide(station_id: str):
     except Exception:
         pass
     return JSONResponse({"error": "No slide available"}, status_code=404)
+
+
+# --- Logo Endpoints ---
+
+
+@app.get("/api/station/{station_id}/logo")
+async def station_logo(station_id: str):
+    station = scanner.get_station(station_id)
+    if not station:
+        return JSONResponse({"error": "Station not found"}, status_code=404)
+
+    logo_path = find_logo(station.name)
+    if logo_path and logo_path.exists():
+        ext = logo_path.suffix.lower()
+        media_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                       ".gif": "image/gif", ".webp": "image/webp"}
+        content_type = media_types.get(ext, "image/png")
+        return FileResponse(logo_path, media_type=content_type,
+                            headers={"Cache-Control": "public, max-age=86400"})
+
+    return JSONResponse({"error": "No logo available"}, status_code=404)
+
+
+@app.post("/api/logos/fetch")
+async def trigger_logo_fetch():
+    count = await fetch_all_logos()
+    return {"status": "ok", "count": count}
+
+
+@app.get("/api/logos/status")
+async def logo_status():
+    return {"cached": has_cached_logos()}
 
 
 # --- Scan Endpoints ---
@@ -318,8 +355,20 @@ async def stop_scan():
 async def _run_scan(full: bool) -> None:
     try:
         await scanner.scan(full=full)
+        # Auto-fetch logos after first scan (one-time)
+        if not has_cached_logos() and len(scanner.stations) > 0:
+            log.info("Triggering one-time logo fetch from Fandom wiki...")
+            asyncio.create_task(_fetch_logos_background())
     except Exception as e:
         log.error(f"Scan failed: {e}")
+
+
+async def _fetch_logos_background() -> None:
+    try:
+        count = await fetch_all_logos()
+        log.info(f"Background logo fetch complete: {count} logos cached")
+    except Exception as e:
+        log.error(f"Background logo fetch failed: {e}")
 
 
 # --- Gain Control ---

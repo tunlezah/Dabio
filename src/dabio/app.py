@@ -111,16 +111,49 @@ app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "static")), name="
 @app.get("/api/stations")
 async def list_stations():
     stations = scanner.stations
+
+    # Fetch mux.json for extra metadata (bitrate, codec, programme type)
+    mux_info: dict[str, dict] = {}
+    try:
+        port = config.welle_cli.internal_port
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"http://127.0.0.1:{port}/mux.json", timeout=3.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                for svc in data.get("services", []):
+                    sid = svc.get("sid", "")
+                    if isinstance(sid, int):
+                        sid = f"{sid:04X}"
+                    else:
+                        sid = str(sid).replace("0x", "").replace("0X", "").upper()
+                    mux_info[sid] = {
+                        "bitrate": svc.get("bitrate", 0),
+                        "mode": svc.get("mode", ""),
+                        "protection": svc.get("protection", ""),
+                        "programType": svc.get("programType", ""),
+                        "language": svc.get("language", ""),
+                    }
+    except Exception:
+        pass
+
     result = []
     for s in stations.values():
-        result.append({
+        entry = {
             "id": s.station_id,
             "name": s.name,
             "ensemble": s.ensemble_name,
             "ensemble_id": s.ensemble_id,
             "service_id": s.service_id,
             "block": s.block,
-        })
+        }
+        extra = mux_info.get(s.service_id, {})
+        if extra:
+            entry["bitrate"] = extra.get("bitrate", 0)
+            entry["mode"] = extra.get("mode", "")
+            entry["protection"] = extra.get("protection", "")
+            entry["programType"] = extra.get("programType", "")
+            entry["language"] = extra.get("language", "")
+        result.append(entry)
     result.sort(key=lambda x: (x["block"], x["name"]))
     return {"stations": result, "count": len(result)}
 
@@ -389,6 +422,19 @@ async def chromecast_cast(request: Request):
 async def chromecast_stop():
     success = await chromecast_mgr.stop_cast()
     return {"status": "stopped" if success else "no_active_cast"}
+
+
+@app.get("/api/chromecast/status")
+async def chromecast_status():
+    """Return current casting status."""
+    cc = chromecast_mgr._active_cast
+    if cc:
+        return {
+            "casting": True,
+            "device_uuid": str(cc.cast_info.uuid) if hasattr(cc, 'cast_info') else None,
+            "device_name": cc.cast_info.friendly_name if hasattr(cc, 'cast_info') else None,
+        }
+    return {"casting": False, "device_uuid": None, "device_name": None}
 
 
 # --- Frontend ---

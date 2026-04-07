@@ -60,15 +60,24 @@ class AudioBroadcaster:
         sid_for_url = self.sid if self.sid.startswith("0x") else f"0x{self.sid}"
         url = f"http://127.0.0.1:{self.welle_port}/mp3/{sid_for_url}"
         retry_delay = 1
+        MAX_RETRY_DELAY = 30
 
         while self._running and self.subscriber_count > 0:
             try:
                 async with httpx.AsyncClient(timeout=None) as client:
                     async with client.stream("GET", url) as resp:
+                        if resp.status_code == 404:
+                            log.info(
+                                f"Station SID {self.sid} not yet available from "
+                                f"welle-cli (404), retrying in {retry_delay}s"
+                            )
+                            await asyncio.sleep(retry_delay)
+                            retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
+                            continue
                         if resp.status_code != 200:
                             log.warning(f"welle-cli /mp3/{self.sid} returned {resp.status_code}")
                             await asyncio.sleep(retry_delay)
-                            retry_delay = min(retry_delay * 2, 10)
+                            retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
                             continue
 
                         retry_delay = 1
@@ -81,13 +90,13 @@ class AudioBroadcaster:
             except httpx.HTTPError as e:
                 log.warning(f"Stream error for SID {self.sid}: {e}")
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 10)
+                retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.error(f"Unexpected error in feed loop for SID {self.sid}: {e}")
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 10)
+                retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
 
         self._running = False
         log.info(f"Feed loop ended for SID {self.sid}")

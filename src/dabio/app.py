@@ -179,6 +179,17 @@ async def play_station(station_id: str):
     return {"status": "playing", "station": station.station_id, "block": station.block}
 
 
+@app.post("/api/station/stop")
+async def stop_station():
+    if config.mock_mode:
+        return {"status": "stopped"}
+    if welle.state in (WelleState.STOPPED, WelleState.ERROR):
+        return {"status": "already_stopped"}
+    await broadcasters.stop_all()
+    await welle.stop()
+    return {"status": "stopped"}
+
+
 @app.get("/api/station/{station_id}/stream")
 async def stream_station(station_id: str, request: Request):
     station = scanner.get_station(station_id)
@@ -324,10 +335,9 @@ async def trigger_scan(full: bool = False):
         return {"status": "already_scanning"}
 
     if welle.state == WelleState.TUNED and not config.mock_mode:
-        return JSONResponse(
-            {"error": "Cannot scan while playing. Stop playback first."},
-            status_code=409,
-        )
+        log.info("Stopping playback before scan")
+        await broadcasters.stop_all()
+        await welle.stop()
 
     asyncio.create_task(_run_scan(full))
     return {"status": "scan_started", "full": full}

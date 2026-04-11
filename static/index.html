@@ -581,7 +581,7 @@
         }
     }
 
-    function stopPlayback() {
+    async function stopPlayback() {
         audioEl.pause(); audioEl.src = '';
         currentStation = null;
         stopMetadataPolling();
@@ -589,6 +589,7 @@
         document.getElementById('np-idle').style.display = 'block';
         document.getElementById('np-title-summary').textContent = '';
         document.querySelectorAll('.station-card.playing').forEach(el => el.classList.remove('playing'));
+        try { await fetch('/api/station/stop', { method: 'POST' }); } catch {}
     }
 
     function showNowPlaying() {
@@ -702,7 +703,7 @@
     async function scanStations(full) {
         if (currentStation) {
             if (!confirm('Scanning will stop playback. Continue?')) return;
-            stopPlayback();
+            await stopPlayback();
         }
         try {
             const r = await fetch(`/api/scan?full=${full}`);

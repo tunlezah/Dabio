@@ -152,8 +152,8 @@ class Scanner:
             return self._stations
 
         if self.welle.state == WelleState.TUNED:
-            log.warning("Cannot scan while audio is playing")
-            return self._stations
+            log.info("Stopping welle-cli before scan")
+            await self.welle.stop()
 
         self._scanning = True
         self._stop_requested = False

@@ -21,18 +21,18 @@ MOCK_BITRATE = 128
 
 # Fake station data for Australian DAB+
 MOCK_STATIONS = [
-    {"sid": "D201", "label": "ABC Canberra", "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C"},
-    {"sid": "D202", "label": "Triple J", "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C"},
-    {"sid": "D203", "label": "ABC News Radio", "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C"},
-    {"sid": "D204", "label": "ABC Classic", "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C"},
-    {"sid": "D205", "label": "Triple J Unearthed", "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C"},
-    {"sid": "D206", "label": "SBS Radio 1", "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C"},
-    {"sid": "D207", "label": "SBS Chill", "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C"},
-    {"sid": "D208", "label": "SBS PopAsia", "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C"},
-    {"sid": "DA01", "label": "Mix 106.3", "ensemble": "Canberra DAB", "eid": "E002", "block": "8D"},
-    {"sid": "DA02", "label": "HIT 104.7", "ensemble": "Canberra DAB", "eid": "E002", "block": "8D"},
-    {"sid": "DA03", "label": "2CC", "ensemble": "Canberra DAB", "eid": "E002", "block": "8D"},
-    {"sid": "DA04", "label": "2CA", "ensemble": "Canberra DAB", "eid": "E002", "block": "8D"},
+    {"sid": "D201", "label": "ABC Canberra",      "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C", "codec": "DAB+", "bitrate": 64, "protection": "EEP 3-A", "snr": 22.0},
+    {"sid": "D202", "label": "Triple J",          "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C", "codec": "DAB+", "bitrate": 80, "protection": "EEP 3-A", "snr": 21.5},
+    {"sid": "D203", "label": "ABC News Radio",    "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C", "codec": "DAB+", "bitrate": 48, "protection": "EEP 3-A", "snr": 20.0},
+    {"sid": "D204", "label": "ABC Classic",       "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C", "codec": "DAB+", "bitrate": 96, "protection": "EEP 3-A", "snr": 19.8},
+    {"sid": "D205", "label": "Triple J Unearthed","ensemble": "ABC/SBS National", "eid": "E001", "block": "9C", "codec": "DAB+", "bitrate": 48, "protection": "EEP 3-A", "snr": 17.2},
+    {"sid": "D206", "label": "SBS Radio 1",       "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C", "codec": "DAB+", "bitrate": 64, "protection": "EEP 3-A", "snr": 12.0},
+    {"sid": "D207", "label": "SBS Chill",         "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C", "codec": "DAB+", "bitrate": 32, "protection": "EEP 3-A", "snr": 8.5},
+    {"sid": "D208", "label": "SBS PopAsia",       "ensemble": "ABC/SBS National", "eid": "E001", "block": "9C", "codec": "DAB+", "bitrate": 32, "protection": "EEP 3-A", "snr": 4.0},
+    {"sid": "DA01", "label": "Mix 106.3",         "ensemble": "Canberra DAB",     "eid": "E002", "block": "8D", "codec": "DAB+", "bitrate": 64, "protection": "EEP 3-A", "snr": 25.3},
+    {"sid": "DA02", "label": "HIT 104.7",         "ensemble": "Canberra DAB",     "eid": "E002", "block": "8D", "codec": "DAB+", "bitrate": 64, "protection": "EEP 3-A", "snr": 18.1},
+    {"sid": "DA03", "label": "2CC",               "ensemble": "Canberra DAB",     "eid": "E002", "block": "8D", "codec": "DAB",  "bitrate": 128,"protection": "UEP 3",   "snr": 14.7},
+    {"sid": "DA04", "label": "2CA",               "ensemble": "Canberra DAB",     "eid": "E002", "block": "8D", "codec": "DAB",  "bitrate": 128,"protection": "UEP 3",   "snr": 11.0},
 ]
 
 MOCK_DLS_MESSAGES = [
@@ -106,14 +106,36 @@ def get_mock_mux_json(channel: str = "9C") -> dict:
             "dls_label": MOCK_DLS_MESSAGES[dls_idx],
             "dls_time": int(time.time()),
             "dls_lastchange": int(time.time()) - 5,
-            "audioBitrate": MOCK_BITRATE,
-            "sampleRate": SAMPLE_RATE,
-            "audioMode": "stereo",
-            "programmeType": "Pop Music",
-            "language": "English",
-            "frameErrors": 0,
-            "rsErrors": 0,
-            "aacErrors": 0,
+            # welle-cli-shaped audio info: populated by the decoder for the
+            # currently-tuned service. In the mock we expose it for every
+            # service on the channel.
+            "channels": 2,
+            "samplerate": SAMPLE_RATE,
+            "mode": "stereo",
+            "programType": 10,
+            "ptystring": "Pop Music",
+            "language": 9,
+            "languagestring": "English",
+            "components": [
+                {
+                    "componentnr": 0,
+                    "primary": True,
+                    "caflag": False,
+                    "label": s["label"],
+                    "transportmode": "audio",
+                    "ascty": s.get("codec", "DAB+"),
+                    "subchannel": {
+                        "subchid": 0,
+                        "bitrate": s.get("bitrate", MOCK_BITRATE),
+                        "cu": 18,
+                        "sad": 0,
+                        "protection": s.get("protection", "EEP 3-A"),
+                    },
+                },
+            ],
+            "frameerrors": 0,
+            "rserrors": 0,
+            "aacerrors": 0,
         })
 
     ensemble = stations_on_channel[0] if stations_on_channel else {"ensemble": "Mock", "eid": "FFFF"}

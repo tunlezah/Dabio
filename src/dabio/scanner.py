@@ -138,6 +138,8 @@ class Scanner:
                     "service_id": s.service_id, "ensemble_id": s.ensemble_id,
                     "name": s.name, "ensemble_name": s.ensemble_name,
                     "block": s.block, "station_id": s.station_id,
+                    "codec": s.codec, "bitrate": s.bitrate,
+                    "protection": s.protection, "snr": s.snr,
                 }
                 for s in self._stations.values()
             ]
@@ -234,6 +236,7 @@ class Scanner:
 
             if result and result.stations:
                 for station in result.stations:
+                    station.snr = snr  # use best SNR observed across the dwell
                     self._stations[station.station_id] = station
                     self._signal_info[station.station_id] = {"snr": snr, "block": block}
                 self.progress.stations_found = len(self._stations)
@@ -258,6 +261,7 @@ class Scanner:
                     self.progress.blocks_scanned += 1
                     if result and result.stations:
                         for station in result.stations:
+                            station.snr = snr
                             self._stations[station.station_id] = station
                             self._signal_info[station.station_id] = {"snr": snr, "block": block}
                         self.progress.stations_found = len(self._stations)
@@ -356,9 +360,35 @@ class Scanner:
             name = _extract_label(svc.get("label", ""))
             if not name:
                 continue
+
+            # Extract codec + subchannel info from the primary audio component.
+            # welle-cli nests this as: svc.components[N].ascty and
+            # svc.components[N].subchannel.{bitrate,protection}.
+            codec = ""
+            bitrate = 0
+            protection = ""
+            for comp in svc.get("components", []):
+                if comp.get("transportmode") != "audio":
+                    continue
+                ascty = comp.get("ascty", "")
+                if ascty and ascty != "unknown":
+                    codec = ascty  # "DAB" or "DAB+"
+                sub = comp.get("subchannel") or {}
+                if isinstance(sub, dict):
+                    br = sub.get("bitrate", 0)
+                    if isinstance(br, (int, float)) and br > 0:
+                        bitrate = int(br)
+                    prot = sub.get("protection", "")
+                    if prot:
+                        protection = str(prot)
+                if codec or bitrate:
+                    break
+
             stations.append(Station(
                 service_id=sid, ensemble_id=ensemble_id,
                 name=name, ensemble_name=ensemble_name, block=block,
+                codec=codec, bitrate=bitrate, protection=protection,
+                snr=snr,
             ))
 
         if not ensemble_name and not stations:

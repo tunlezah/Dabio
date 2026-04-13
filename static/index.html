@@ -180,6 +180,8 @@
         .card-badge.bitrate { color: var(--success); }
         .card-badge.mode { color: #79c0ff; }
         .card-badge.type { color: var(--warning); }
+        .card-badge.codec { color: #c792ea; }
+        .card-badge.samplerate { color: var(--text-dim); }
 
         /* ── Station Card Logo ────────────────────────────────── */
         .card-logo {
@@ -191,8 +193,12 @@
         .card-top-with-logo { display: flex; align-items: center; gap: 10px; }
 
         /* ── Signal Bars ─────────────────────────────────────── */
+        /* Default ("snapshot") = blue, captured at last scan.
+           When a station is selected/playing we re-render the bars live
+           and use the active/medium/weak palette (green/amber/red). */
         .signal-bars { display: flex; gap: 2px; align-items: flex-end; height: 16px; flex-shrink: 0; }
         .signal-bar { width: 3px; background: var(--border); border-radius: 1px; }
+        .signal-bar.snapshot { background: #60a5fa; }
         .signal-bar.active { background: var(--success); }
         .signal-bar.medium { background: var(--warning); }
         .signal-bar.weak { background: var(--error); }
@@ -504,22 +510,31 @@
             html += `</div>`;
             html += `<div class="station-grid">`;
             for (const s of g.items) {
-                const playing = currentStation?.id === s.id ? ' playing' : '';
+                const isPlaying = currentStation?.id === s.id;
+                const playing = isPlaying ? ' playing' : '';
+                // Prefer the per-station scan snapshot; fall back to
+                // /api/signal (which carries the same value, useful when the
+                // cache is loaded before a scan has completed).
                 const sig = signalData[s.id];
-                const snr = sig?.snr || 0;
+                const snr = (typeof s.snr === 'number' && s.snr > 0)
+                    ? s.snr
+                    : (sig?.snr || 0);
+                const variant = isPlaying ? 'live' : 'snapshot';
                 html += `<div class="station-card${playing}" onclick="playStation('${s.id}')" data-id="${s.id}">`;
                 html += `<div class="card-top">`;
                 html += `<div class="card-top-with-logo">`;
                 html += `<img class="card-logo" data-station-id="${s.id}" src="/api/station/${s.id}/logo" onload="this.classList.add('loaded')" onerror="this.classList.remove('loaded')">`;
                 html += `<span class="card-name">${esc(s.name)}</span>`;
                 html += `</div>`;
-                html += renderSignalBars(snr);
+                html += renderSignalBars(snr, variant);
                 html += `</div>`;
                 html += `<div class="card-meta">`;
                 html += `<span class="card-sid">${s.service_id}</span>`;
-                if (s.bitrate) html += `<span class="card-badge bitrate">${s.bitrate} kbps</span>`;
+                const codecLabel = codecDisplay(s.codec);
+                if (codecLabel) html += `<span class="card-badge codec">${esc(codecLabel)}</span>`;
+                if (s.samplerate) html += `<span class="card-badge samplerate">${formatSampleRate(s.samplerate)}</span>`;
                 if (s.mode) html += `<span class="card-badge mode">${esc(s.mode)}</span>`;
-                if (s.programType) html += `<span class="card-badge type">${esc(s.programType)}</span>`;
+                if (s.bitrate) html += `<span class="card-badge bitrate">${s.bitrate} kbit/s</span>`;
                 html += `</div>`;
                 html += `</div>`;
             }
@@ -528,11 +543,32 @@
         container.innerHTML = html;
     }
 
-    function renderSignalBars(snr) {
+    function codecDisplay(ascty) {
+        // welle-cli reports "DAB" (MPEG-1 Layer II) or "DAB+" (HE-AAC).
+        if (!ascty) return '';
+        if (ascty === 'DAB+') return 'HE-AAC';
+        if (ascty === 'DAB') return 'MP2';
+        return ascty;
+    }
+
+    function formatSampleRate(hz) {
+        if (!hz) return '';
+        const khz = hz >= 1000 ? hz / 1000 : hz;
+        return `${Number.isInteger(khz) ? khz : khz.toFixed(1)} kHz`;
+    }
+
+    // Variant: "snapshot" (blue — from last scan) or "live" (red/amber/green
+    // — currently-playing station, driven by metadata polling).
+    function renderSignalBars(snr, variant = 'snapshot') {
         const bars = 5;
         const level = snr <= 0 ? 0 : snr < 5 ? 1 : snr < 10 ? 2 : snr < 15 ? 3 : snr < 20 ? 4 : 5;
-        const cls = level <= 1 ? 'weak' : level <= 2 ? 'medium' : 'active';
-        let html = `<div class="signal-bars" title="SNR: ${snr.toFixed(1)} dB">`;
+        let cls;
+        if (variant === 'live') {
+            cls = level <= 1 ? 'weak' : level <= 2 ? 'medium' : 'active';
+        } else {
+            cls = 'snapshot';
+        }
+        let html = `<div class="signal-bars" data-variant="${variant}" title="SNR: ${snr.toFixed(1)} dB${variant === 'snapshot' ? ' (last scan)' : ''}">`;
         for (let i = 0; i < bars; i++) {
             const h = 4 + i * 3;
             const active = i < level ? cls : '';
@@ -569,6 +605,9 @@
             audioEl.play().catch(e => console.warn('Autoplay blocked:', e));
 
             showNowPlaying();
+            // Re-render so the previously-playing card reverts to its blue
+            // scan-snapshot bars and the new one flips to the live palette.
+            renderStations(sd.stations);
             highlightStation(stationId);
             startMetadataPolling(stationId);
             // Re-render chromecast if visible
@@ -590,6 +629,8 @@
         document.getElementById('np-title-summary').textContent = '';
         document.querySelectorAll('.station-card.playing').forEach(el => el.classList.remove('playing'));
         try { await fetch('/api/station/stop', { method: 'POST' }); } catch {}
+        // Flip every card's bars back to the blue snapshot palette.
+        loadStations();
     }
 
     function showNowPlaying() {
@@ -597,8 +638,11 @@
         document.getElementById('np-station-name').textContent = currentStation.name;
         let ensembleText = `${currentStation.ensemble}`;
         if (currentStation.block) ensembleText += ` · Block ${currentStation.block}`;
-        if (currentStation.bitrate) ensembleText += ` · ${currentStation.bitrate} kbps`;
-        if (currentStation.mode) ensembleText += ` · ${currentStation.mode}`;
+        const codec = codecDisplay(currentStation.codec);
+        if (codec) ensembleText += ` · ${codec}`;
+        if (currentStation.samplerate) ensembleText += ` · ${formatSampleRate(currentStation.samplerate)}`;
+        if (currentStation.mode) ensembleText += ` ${currentStation.mode}`;
+        if (currentStation.bitrate) ensembleText += ` @ ${currentStation.bitrate} kbit/s`;
         document.getElementById('np-ensemble').textContent = ensembleText;
         document.getElementById('np-dls').textContent = 'Waiting for metadata...';
         document.getElementById('np-slide').classList.remove('visible');
@@ -687,14 +731,19 @@
             }
 
             // Update live signal strength on the playing station's card
+            // — rendered in the "live" (green/amber/red) palette.
             if (d.snr !== undefined && d.snr > 0) {
                 const card = document.querySelector(`.station-card[data-id="${stationId}"]`);
                 if (card) {
                     const barsEl = card.querySelector('.signal-bars');
                     if (barsEl) {
-                        barsEl.outerHTML = renderSignalBars(d.snr);
+                        barsEl.outerHTML = renderSignalBars(d.snr, 'live');
                     }
                 }
+                // Keep the in-memory signal cache in sync so a re-render
+                // (after a scan, theme change, etc.) doesn't revert to a
+                // stale snapshot.
+                signalData[stationId] = { ...(signalData[stationId] || {}), snr: d.snr };
             }
         } catch {}
     }

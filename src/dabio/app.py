@@ -80,8 +80,15 @@ async def lifespan(application: FastAPI):
                 name=s["label"],
                 ensemble_name=s.get("ensemble", "Mock"),
                 block=s.get("block", "9C"),
+                codec=s.get("codec", ""),
+                bitrate=s.get("bitrate", 0),
+                protection=s.get("protection", ""),
+                snr=s.get("snr", 0.0),
             )
             scanner._stations[station.station_id] = station
+            scanner._signal_info[station.station_id] = {
+                "snr": station.snr, "block": station.block,
+            }
         log.info(f"Mock mode: loaded {len(scanner._stations)} fake stations")
     else:
         # Detect welle-cli
@@ -111,10 +118,18 @@ app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "static")), name="
 
 @app.get("/api/stations")
 async def list_stations():
+    """Return stations with their scan-captured metadata.
+
+    Codec, bitrate, protection and SNR are populated during the scan
+    (from welle-cli's FIC-derived /mux.json) and persist across tunings
+    and restarts via the stations.json cache. Sample rate and channel
+    mode are only known for the currently-tuned service, so they are
+    overlaid from live /mux.json when available.
+    """
     stations = scanner.stations
 
-    # Fetch mux.json for extra metadata (bitrate, codec, programme type)
-    mux_info: dict[str, dict] = {}
+    # Overlay sample rate + mode for the currently-tuned service only.
+    live_extras: dict[str, dict] = {}
     try:
         port = config.welle_cli.internal_port
         async with httpx.AsyncClient() as client:
@@ -127,13 +142,13 @@ async def list_stations():
                         sid = f"{sid:04X}"
                     else:
                         sid = str(sid).replace("0x", "").replace("0X", "").upper()
-                    mux_info[sid] = {
-                        "bitrate": svc.get("bitrate", 0),
-                        "mode": svc.get("mode", ""),
-                        "protection": svc.get("protection", ""),
-                        "programType": svc.get("programType", ""),
-                        "language": svc.get("language", ""),
-                    }
+                    samplerate = svc.get("samplerate", 0)
+                    mode = svc.get("mode", "")
+                    if (isinstance(samplerate, (int, float)) and samplerate > 0) or mode:
+                        live_extras[sid] = {
+                            "samplerate": int(samplerate) if samplerate else 0,
+                            "mode": mode if mode and mode != "invalid" else "",
+                        }
     except Exception:
         pass
 
@@ -146,14 +161,17 @@ async def list_stations():
             "ensemble_id": s.ensemble_id,
             "service_id": s.service_id,
             "block": s.block,
+            "codec": s.codec,
+            "bitrate": s.bitrate,
+            "protection": s.protection,
+            "snr": s.snr,
         }
-        extra = mux_info.get(s.service_id, {})
+        extra = live_extras.get(s.service_id)
         if extra:
-            entry["bitrate"] = extra.get("bitrate", 0)
-            entry["mode"] = extra.get("mode", "")
-            entry["protection"] = extra.get("protection", "")
-            entry["programType"] = extra.get("programType", "")
-            entry["language"] = extra.get("language", "")
+            if extra["samplerate"]:
+                entry["samplerate"] = extra["samplerate"]
+            if extra["mode"]:
+                entry["mode"] = extra["mode"]
         result.append(entry)
     result.sort(key=lambda x: (x["block"], x["name"]))
     return {"stations": result, "count": len(result)}

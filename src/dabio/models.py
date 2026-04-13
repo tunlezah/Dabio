@@ -9,6 +9,11 @@ class Station:
     name: str
     ensemble_name: str
     block: str  # DAB channel block e.g. "9C"
+    # Audio/subchannel info captured from the scan (FIC) — stays permanent
+    codec: str = ""  # "DAB+" or "DAB" (ascty)
+    bitrate: int = 0  # kbps (subchannel bitrate)
+    protection: str = ""  # protection level e.g. "EEP 3-A"
+    snr: float = 0.0  # dB at time of scan (snapshot)
     # Composite unique key
     station_id: str = ""  # auto-generated: "{ensemble_id}_{service_id}"
 

@@ -5,7 +5,7 @@ set +e
 
 # ══════════════════════════════════════════════════════════════════════
 #  Dabio Installer — DAB+ Radio Web Player
-#  Target: Ubuntu 24.04 (Noble Numbat)
+#  Target: Ubuntu 24.04 LTS (Noble) and 26.04 LTS — Debian-like fallback
 #
 #  This installer will:
 #    1. Clean up any prior Dabio / welle-cli processes
@@ -81,10 +81,21 @@ info "Running as root"
 # Detect OS
 if [ -f /etc/os-release ]; then
     . /etc/os-release
-    if [ "$ID" = "ubuntu" ] && [[ "$VERSION_ID" == "24.04"* ]]; then
-        info "Ubuntu 24.04 detected"
+    if [ "$ID" = "ubuntu" ]; then
+        case "$VERSION_ID" in
+            24.04*|26.04*)
+                info "Ubuntu $VERSION_ID detected (supported LTS)"
+                ;;
+            *)
+                warn "Tested on Ubuntu 24.04 / 26.04 LTS. Detected: $VERSION_ID — proceeding anyway"
+                WARNINGS+=("Untested Ubuntu version: $VERSION_ID")
+                ;;
+        esac
+    elif [ "$ID_LIKE" = "debian" ] || [[ "$ID_LIKE" == *debian* ]]; then
+        warn "Non-Ubuntu Debian-like OS ($ID $VERSION_ID) — package names should match, proceeding"
+        WARNINGS+=("Running on $ID $VERSION_ID (Debian-like, untested)")
     else
-        warn "This installer targets Ubuntu 24.04. Detected: $ID $VERSION_ID"
+        warn "This installer targets Ubuntu 24.04 / 26.04 LTS. Detected: $ID $VERSION_ID"
         WARNINGS+=("Running on unsupported OS: $ID $VERSION_ID")
     fi
 else
@@ -145,9 +156,14 @@ step "Installing system dependencies"
 
 apt-get update -qq >> "$LOG_FILE" 2>&1
 
+# Note: the librtlsdr runtime library (librtlsdr2 / librtlsdr0 / t64-renamed)
+# is pulled in transitively by rtl-sdr and librtlsdr-dev, so it is NOT listed
+# by name here — the soname-versioned package name changes between releases.
+# build-essential + python3-dev let pip build any C-extension wheel from sdist
+# (e.g. lameenc) on newer Python versions that may lack prebuilt wheels.
 SYSTEM_PKGS=(
-    python3 python3-venv python3-pip
-    rtl-sdr librtlsdr-dev librtlsdr2
+    python3 python3-venv python3-pip python3-dev build-essential
+    rtl-sdr librtlsdr-dev
     ffmpeg
     avahi-daemon avahi-utils
     libusb-1.0-0-dev

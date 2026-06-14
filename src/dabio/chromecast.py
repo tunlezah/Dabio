@@ -60,7 +60,7 @@ class ChromecastManager:
                 self._devices[dev.uuid] = dev
             return devices
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         devices = await loop.run_in_executor(None, _discover)
         log.info(f"Discovered {len(devices)} Chromecast devices")
         return devices
@@ -93,7 +93,7 @@ class ChromecastManager:
                     return True
             return False
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         success = await loop.run_in_executor(None, _cast)
         if success:
             log.info(f"Casting station {station_id} to {device.name}")
@@ -115,7 +115,7 @@ class ChromecastManager:
                 log.error(f"Failed to stop cast: {e}")
                 return False
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         success = await loop.run_in_executor(None, _stop)
         if success:
             self._active_cast = None
